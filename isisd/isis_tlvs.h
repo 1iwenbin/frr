@@ -335,6 +335,20 @@ struct isis_ipv6_address {
 	struct in6_addr addr;
 };
 
+/* RFC 9666 Area Proxy */
+#define ISIS_AREA_PROXY_SUBTLV_SYSID 1
+#define ISIS_AREA_PROXY_SUBTLV_SID   2
+#define ISIS_AREA_PROXY_SID_FLAG_L   0x01
+
+struct isis_area_proxy_item {
+	struct isis_item item;
+	uint8_t proxy_sysid[ISIS_SYS_ID_LEN];
+	bool has_sid;
+	uint32_t area_sid;
+};
+
+#define ISIS_AREA_PROXY_SID_FLAG_L 0x01
+
 struct isis_mt_router_info {
 	struct isis_mt_router_info *next;
 
@@ -410,8 +424,10 @@ struct isis_tlvs {
 	struct isis_mt_item_list mt_ipv6_reach;
 	struct isis_threeway_adj *threeway_adj;
 	struct isis_router_cap *router_cap;
-	struct isis_spine_leaf *spine_leaf;
+struct isis_spine_leaf *spine_leaf;
 	struct isis_mt_item_list srv6_locator;
+	/* RFC 9666 Area Proxy */
+	struct isis_item_list area_proxy;
 };
 
 enum isis_tlv_context {
@@ -454,6 +470,10 @@ enum isis_tlv_type {
 	ISIS_TLV_LSP_ENTRY = 9,
 	ISIS_TLV_AUTH = 10,
 	ISIS_TLV_PURGE_ORIGINATOR = 13,
+
+	/* RFC 9666 Area Proxy */
+	ISIS_TLV_AREA_PROXY = 20,
+
 	ISIS_TLV_EXTENDED_REACH = 22,
 
 	ISIS_TLV_SRV6_LOCATOR = 27,

@@ -278,6 +278,13 @@ struct isis_area {
 	/* Typesafe list membership for isis->area_list */
 	struct isis_area_list_item area_list_item;
 
+	/* === RFC 9666 Area Proxy === */
+	bool area_proxy_enabled;
+	uint8_t area_proxy_sysid[ISIS_SYS_ID_LEN];
+	uint32_t area_proxy_sid;
+	struct isis_lsp *proxy_lsp[ISIS_LEVELS];
+	struct event *t_proxy_lsp_refresh;
+
 	QOBJ_FIELDS;
 };
 DECLARE_QOBJ_TYPE(isis_area);

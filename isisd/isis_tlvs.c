@@ -106,6 +106,7 @@ static const struct pack_order_entry pack_order[] = {
 	PACK_ENTRY(MT_IP_REACH, ISIS_MT_ITEMS, mt_ip_reach),
 	PACK_ENTRY(IPV6_REACH, ISIS_ITEMS, ipv6_reach),
 	PACK_ENTRY(MT_IPV6_REACH, ISIS_MT_ITEMS, mt_ipv6_reach),
+	PACK_ENTRY(AREA_PROXY, ISIS_ITEMS, area_proxy),
 	PACK_ENTRY(SRV6_LOCATOR, ISIS_MT_ITEMS, srv6_locator)
 };
 
@@ -6194,6 +6195,7 @@ struct isis_tlvs *isis_alloc_tlvs(void)
 	init_item_list(&result->ipv6_reach);
 	RB_INIT(isis_mt_item_list, &result->mt_ipv6_reach);
 	RB_INIT(isis_mt_item_list, &result->srv6_locator);
+	init_item_list(&result->area_proxy);
 
 	return result;
 }
@@ -6266,6 +6268,9 @@ struct isis_tlvs *isis_copy_tlvs(struct isis_tlvs *tlvs)
 
 	copy_mt_items(ISIS_CONTEXT_LSP, ISIS_TLV_SRV6_LOCATOR, &tlvs->srv6_locator,
 		      &rv->srv6_locator);
+
+	copy_items(ISIS_CONTEXT_LSP, ISIS_TLV_AREA_PROXY, &tlvs->area_proxy,
+		   &rv->area_proxy);
 
 	return rv;
 }
@@ -6345,6 +6350,9 @@ static void format_tlvs(struct isis_tlvs *tlvs, struct sbuf *buf, struct json_ob
 
 	format_mt_items(ISIS_CONTEXT_LSP, ISIS_TLV_SRV6_LOCATOR, &tlvs->srv6_locator, buf, json,
 			indent);
+
+	format_items(ISIS_CONTEXT_LSP, ISIS_TLV_AREA_PROXY, &tlvs->area_proxy, buf, json,
+		     indent);
 }
 
 const char *isis_format_tlvs(struct isis_tlvs *tlvs, struct json_object *json)
@@ -6395,6 +6403,7 @@ void isis_free_tlvs(struct isis_tlvs *tlvs)
 	free_tlv_router_cap(tlvs->router_cap);
 	free_tlv_spine_leaf(tlvs->spine_leaf);
 	free_mt_items(ISIS_CONTEXT_LSP, ISIS_TLV_SRV6_LOCATOR, &tlvs->srv6_locator);
+	free_items(ISIS_CONTEXT_LSP, ISIS_TLV_AREA_PROXY, &tlvs->area_proxy);
 
 	XFREE(MTYPE_ISIS_TLV, tlvs);
 }
@@ -6817,6 +6826,129 @@ ITEM_TLV_OPS(srv6_locator, "TLV 27 SRv6 Locator");
 ITEM_SUBTLV_OPS(srv6_end_sid, "Sub-TLV 5 SRv6 End SID");
 SUBSUBTLV_OPS(srv6_sid_structure, "Sub-Sub-TLV 1 SRv6 SID Structure");
 
+/* ────────── RFC 9666 Area Proxy ────────── */
+
+static int pack_item_area_proxy(struct isis_item *i, struct stream *s,
+				size_t *min_len)
+{
+	struct isis_area_proxy_item *ap = (struct isis_area_proxy_item *)i;
+
+	/* SubTLV1: Proxy System ID (type=1, len=6) */
+	if (STREAM_WRITEABLE(s) < 2 + ISIS_SYS_ID_LEN)
+		return 1;
+	stream_putc(s, ISIS_AREA_PROXY_SUBTLV_SYSID);
+	stream_putc(s, ISIS_SYS_ID_LEN);
+	stream_put(s, ap->proxy_sysid, ISIS_SYS_ID_LEN);
+
+	/* SubTLV2: Area SID (type=2, len=4) */
+	if (ap->has_sid) {
+		if (STREAM_WRITEABLE(s) < 2 + 4)
+			return 1;
+		stream_putc(s, ISIS_AREA_PROXY_SUBTLV_SID);
+		stream_putc(s, 4);
+		stream_putl(s, ap->area_sid);
+	}
+
+	return 0;
+}
+
+static int unpack_item_area_proxy(uint16_t mtid, uint8_t len,
+				  struct stream *s, struct sbuf *log,
+				  void *dest, int indent)
+{
+	struct isis_tlvs *tlvs = dest;
+	struct isis_area_proxy_item *ap;
+	uint8_t sub_type, sub_len;
+	uint8_t *end;
+
+	ap = XCALLOC(MTYPE_ISIS_TLV, sizeof(*ap));
+	end = stream_pnt(s) + len;
+
+	sbuf_push(log, indent, "Area Proxy TLV:\n");
+
+	while (stream_pnt(s) + 2 <= end) {
+		sub_type = stream_getc(s);
+		sub_len = stream_getc(s);
+
+		if (stream_pnt(s) + sub_len > end) {
+			sbuf_push(log, indent + 2,
+				  "Truncated SubTLV type %u\n", sub_type);
+			break;
+		}
+
+		switch (sub_type) {
+		case ISIS_AREA_PROXY_SUBTLV_SYSID:
+			if (sub_len >= ISIS_SYS_ID_LEN) {
+				stream_get(ap->proxy_sysid, s, ISIS_SYS_ID_LEN);
+				sbuf_push(log, indent + 2,
+					  "Proxy System ID: %02x%02x.%02x%02x.%02x%02x\n",
+					  ap->proxy_sysid[0], ap->proxy_sysid[1],
+					  ap->proxy_sysid[2], ap->proxy_sysid[3],
+					  ap->proxy_sysid[4], ap->proxy_sysid[5]);
+			}
+			break;
+		case ISIS_AREA_PROXY_SUBTLV_SID:
+			if (sub_len >= 4) {
+				ap->area_sid = stream_getl(s);
+				ap->has_sid = true;
+				sbuf_push(log, indent + 2,
+					  "Area SID: %u (0x%x)\n",
+					  ap->area_sid, ap->area_sid);
+			}
+			break;
+		default:
+			sbuf_push(log, indent + 2,
+				  "Unknown SubTLV type %u (len %u)\n",
+				  sub_type, sub_len);
+			/* Skip unknown subTLV */
+			stream_getc(s); /* Not correct for sub_len > 1 */
+			break;
+		}
+	}
+
+	append_item(&tlvs->area_proxy, &ap->item);
+	return 0;
+}
+
+static void format_item_area_proxy(uint16_t mtid, struct isis_item *i,
+				   struct sbuf *buf, struct json_object *json,
+				   int indent)
+{
+	struct isis_area_proxy_item *ap = (struct isis_area_proxy_item *)i;
+	char sysid_str[20];
+
+	snprintf(sysid_str, sizeof(sysid_str),
+		 "%02x%02x.%02x%02x.%02x%02x",
+		 ap->proxy_sysid[0], ap->proxy_sysid[1],
+		 ap->proxy_sysid[2], ap->proxy_sysid[3],
+		 ap->proxy_sysid[4], ap->proxy_sysid[5]);
+
+	sbuf_push(buf, indent, "Proxy System-ID: %s\n", sysid_str);
+	if (ap->has_sid)
+		sbuf_push(buf, indent + 2, "Area SID: %u\n", ap->area_sid);
+}
+
+static struct isis_item *copy_item_area_proxy(struct isis_item *i)
+{
+	struct isis_area_proxy_item *src = (struct isis_area_proxy_item *)i;
+	struct isis_area_proxy_item *copy;
+
+	copy = XCALLOC(MTYPE_ISIS_TLV, sizeof(*copy));
+	memcpy(copy->proxy_sysid, src->proxy_sysid, ISIS_SYS_ID_LEN);
+	copy->has_sid = src->has_sid;
+	copy->area_sid = src->area_sid;
+
+	return &copy->item;
+}
+
+static void free_item_area_proxy(struct isis_item *i)
+{
+	struct isis_area_proxy_item *ap = (struct isis_area_proxy_item *)i;
+	XFREE(MTYPE_ISIS_TLV, ap);
+}
+
+ITEM_TLV_OPS(area_proxy, "TLV 20 Area Proxy");
+
 static const struct tlv_ops *const tlv_table[ISIS_CONTEXT_MAX][ISIS_TLV_MAX] = {
 	[ISIS_CONTEXT_LSP] = {
 		[ISIS_TLV_AREA_ADDRESSES] = &tlv_area_address_ops,
@@ -6825,6 +6957,7 @@ static const struct tlv_ops *const tlv_table[ISIS_CONTEXT_MAX][ISIS_TLV_MAX] = {
 		[ISIS_TLV_LSP_ENTRY] = &tlv_lsp_entry_ops,
 		[ISIS_TLV_AUTH] = &tlv_auth_ops,
 		[ISIS_TLV_PURGE_ORIGINATOR] = &tlv_purge_originator_ops,
+		[ISIS_TLV_AREA_PROXY] = &tlv_area_proxy_ops,
 		[ISIS_TLV_EXTENDED_REACH] = &tlv_extended_reach_ops,
 		[ISIS_TLV_OLDSTYLE_IP_REACH] = &tlv_oldstyle_ip_reach_ops,
 		[ISIS_TLV_PROTOCOLS_SUPPORTED] = &tlv_protocols_supported_ops,

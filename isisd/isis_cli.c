@@ -24,6 +24,7 @@
 #include "isisd/isis_circuit.h"
 #include "isisd/isis_csm.h"
 #include "isisd/isis_flex_algo.h"
+#include "isisd/isis_area_proxy.h"
 
 #include "isisd/isis_cli_clippy.c"
 
@@ -1779,8 +1780,7 @@ void cli_show_isis_prefix_sid(struct vty *vty, const struct lyd_node *dnode, boo
 
 #ifndef FABRICD
 /*
- * XPath:
- * /frr-isisd:isis/instance/segment-routing/algorithm-prefix-sids/algorithm-prefix-sid
+ * XPath: /frr-isisd:isis/instance/segment-routing/algorithm-prefix-sids/algorithm-prefix-sid
  */
 DEFPY_YANG(
 	isis_sr_prefix_sid_algorithm, isis_sr_prefix_sid_algorithm_cmd,
@@ -3620,6 +3620,37 @@ void cli_show_isis_flex_algo_end(struct vty *vty, const struct lyd_node *dnode)
 	vty_out(vty, " !\n");
 }
 
+/* ────────── RFC 9666 Area Proxy ────────── */
+
+DEFUN_NOSH(area_proxy,
+	   area_proxy_cmd,
+	   "area-proxy",
+	   "Enable IS-IS Area Proxy (RFC 9666)\n")
+{
+	struct isis_area *area = VTY_GET_CONTEXT(isis_area);
+
+	if (!area)
+		return CMD_WARNING;
+
+	isis_area_proxy_enable(area);
+	return CMD_SUCCESS;
+}
+
+DEFUN_NOSH(no_area_proxy,
+	   no_area_proxy_cmd,
+	   "no area-proxy",
+	   NO_STR
+	   "Disable IS-IS Area Proxy (RFC 9666)\n")
+{
+	struct isis_area *area = VTY_GET_CONTEXT(isis_area);
+
+	if (!area)
+		return CMD_WARNING;
+
+	isis_area_proxy_disable(area);
+	return CMD_SUCCESS;
+}
+
 
 void isis_cli_init(void)
 {
@@ -3727,69 +3758,7 @@ void isis_cli_init(void)
 	install_element(ISIS_SRV6_NODE_MSD_NODE, &isis_srv6_node_msd_max_h_encaps_cmd);
 	install_element(ISIS_SRV6_NODE_MSD_NODE, &isis_srv6_node_msd_max_end_d_cmd);
 
-	install_element(INTERFACE_NODE, &isis_passive_cmd);
-
-	install_element(INTERFACE_NODE, &isis_passwd_cmd);
-	install_element(INTERFACE_NODE, &no_isis_passwd_cmd);
-
-	install_element(INTERFACE_NODE, &isis_metric_cmd);
-	install_element(INTERFACE_NODE, &no_isis_metric_cmd);
-
-	install_element(INTERFACE_NODE, &isis_hello_interval_cmd);
-	install_element(INTERFACE_NODE, &no_isis_hello_interval_cmd);
-
-	install_element(INTERFACE_NODE, &isis_hello_multiplier_cmd);
-	install_element(INTERFACE_NODE, &no_isis_hello_multiplier_cmd);
-
-	install_element(INTERFACE_NODE, &isis_threeway_adj_cmd);
-
-	install_element(INTERFACE_NODE, &isis_hello_padding_cmd);
-
-	install_element(INTERFACE_NODE, &csnp_interval_cmd);
-	install_element(INTERFACE_NODE, &no_csnp_interval_cmd);
-
-	install_element(INTERFACE_NODE, &psnp_interval_cmd);
-	install_element(INTERFACE_NODE, &no_psnp_interval_cmd);
-
-	install_element(INTERFACE_NODE, &circuit_topology_cmd);
-
-	install_element(INTERFACE_NODE, &isis_circuit_type_cmd);
-	install_element(INTERFACE_NODE, &no_isis_circuit_type_cmd);
-
-	install_element(INTERFACE_NODE, &isis_network_cmd);
-
-	install_element(INTERFACE_NODE, &isis_priority_cmd);
-	install_element(INTERFACE_NODE, &no_isis_priority_cmd);
-
-	install_element(INTERFACE_NODE, &isis_lfa_cmd);
-	install_element(INTERFACE_NODE, &isis_lfa_exclude_interface_cmd);
-	install_element(INTERFACE_NODE, &isis_remote_lfa_cmd);
-	install_element(INTERFACE_NODE, &isis_remote_lfa_max_metric_cmd);
-	install_element(INTERFACE_NODE, &isis_ti_lfa_cmd);
-
-	install_element(ISIS_NODE, &log_adj_changes_cmd);
-	install_element(ISIS_NODE, &log_pdu_drops_cmd);
-
-	install_element(ISIS_NODE, &isis_mpls_ldp_sync_cmd);
-	install_element(ISIS_NODE, &no_isis_mpls_ldp_sync_cmd);
-	install_element(ISIS_NODE, &isis_mpls_ldp_sync_holddown_cmd);
-	install_element(ISIS_NODE, &no_isis_mpls_ldp_sync_holddown_cmd);
-	install_element(INTERFACE_NODE, &isis_mpls_if_ldp_sync_cmd);
-	install_element(INTERFACE_NODE, &isis_mpls_if_ldp_sync_holddown_cmd);
-	install_element(INTERFACE_NODE, &no_isis_mpls_if_ldp_sync_holddown_cmd);
-
-	install_element(ISIS_NODE, &flex_algo_cmd);
-	install_element(ISIS_NODE, &no_flex_algo_cmd);
-	install_element(ISIS_FLEX_ALGO_NODE, &advertise_definition_cmd);
-	install_element(ISIS_FLEX_ALGO_NODE, &affinity_include_any_cmd);
-	install_element(ISIS_FLEX_ALGO_NODE, &affinity_include_all_cmd);
-	install_element(ISIS_FLEX_ALGO_NODE, &affinity_exclude_any_cmd);
-	install_element(ISIS_FLEX_ALGO_NODE, &dplane_sr_mpls_cmd);
-	install_element(ISIS_FLEX_ALGO_NODE, &dplane_srv6_cmd);
-	install_element(ISIS_FLEX_ALGO_NODE, &dplane_ip_cmd);
-	install_element(ISIS_FLEX_ALGO_NODE, &prefix_metric_cmd);
-	install_element(ISIS_FLEX_ALGO_NODE, &metric_type_cmd);
-	install_element(ISIS_FLEX_ALGO_NODE, &priority_cmd);
+	install_element(ISIS_NODE, &area_proxy_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_cmd);
 }
-
 #endif /* ifndef FABRICD */
