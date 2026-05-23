@@ -5944,3 +5944,19 @@ void vtysh_init_vty(void)
 	install_element(CONFIG_NODE, &no_vtysh_enable_password_cmd);
 	install_element(CONFIG_NODE, &vtysh_exec_timeout_cmd);
 }
+
+/* RFC 9666 Area Proxy */
+DEFUNSH(VTYSH_ISISD, area_proxy, area_proxy_cmd,
+       "area-proxy",
+       "Enable IS-IS Area Proxy (RFC 9666)\n")
+{
+       return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_ISISD, no_area_proxy, no_area_proxy_cmd,
+       "no area-proxy",
+       NO_STR
+       "Disable IS-IS Area Proxy (RFC 9666)\n")
+{
+       return CMD_SUCCESS;
+}

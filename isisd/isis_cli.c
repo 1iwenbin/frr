@@ -3622,7 +3622,7 @@ void cli_show_isis_flex_algo_end(struct vty *vty, const struct lyd_node *dnode)
 
 /* ────────── RFC 9666 Area Proxy ────────── */
 
-DEFUN_NOSH(area_proxy,
+DEFPY_NOSH(area_proxy,
 	   area_proxy_cmd,
 	   "area-proxy",
 	   "Enable IS-IS Area Proxy (RFC 9666)\n")
@@ -3636,7 +3636,7 @@ DEFUN_NOSH(area_proxy,
 	return CMD_SUCCESS;
 }
 
-DEFUN_NOSH(no_area_proxy,
+DEFPY_NOSH(no_area_proxy,
 	   no_area_proxy_cmd,
 	   "no area-proxy",
 	   NO_STR
