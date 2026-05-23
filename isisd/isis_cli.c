@@ -50,8 +50,16 @@ DEFPY_YANG_NOSH(router_isis, router_isis_cmd,
 	nb_cli_enqueue_change(vty, ".", NB_OP_CREATE, NULL);
 
 	ret = nb_cli_apply_changes(vty, "%s", base_xpath);
-	if (ret == CMD_SUCCESS)
+	if (ret == CMD_SUCCESS) {
 		VTY_PUSH_XPATH(ISIS_NODE, base_xpath);
+
+		/* Also set the legacy context for non-YANG commands
+		 * (e.g., area-proxy, proxy-sysid) that use
+		 * VTY_GET_CONTEXT(isis_area). */
+		struct isis_area *area = isis_area_lookup_by_vrf(tag, vrf_name);
+		if (area)
+			VTY_PUSH_CONTEXT(ISIS_NODE, area);
+	}
 
 	return ret;
 }
@@ -3651,6 +3659,86 @@ DEFPY_NOSH(no_area_proxy,
 	return CMD_SUCCESS;
 }
 
+DEFPY_NOSH(area_proxy_sysid,
+	   area_proxy_sysid_cmd,
+	   "proxy-sysid WORD",
+	   "Configure Proxy System ID for Area Proxy\n"
+	   "Proxy System ID in XXXX.XXXX.XXXX format\n")
+{
+	struct isis_area *area = VTY_GET_CONTEXT(isis_area);
+
+	if (!area)
+		return CMD_WARNING;
+
+	if (!area->area_proxy_enabled) {
+		vty_out(vty,
+			"%% Area Proxy is not enabled. Enable with 'area-proxy' first.\n");
+		return CMD_WARNING;
+	}
+
+	if (isis_area_proxy_set_sysid(area, proxy_sysid) != 0) {
+		vty_out(vty, "%% Failed to set Proxy System ID\n");
+		return CMD_WARNING;
+	}
+
+	return CMD_SUCCESS;
+}
+
+DEFPY_NOSH(no_area_proxy_sysid,
+	   no_area_proxy_sysid_cmd,
+	   "no proxy-sysid",
+	   NO_STR
+	   "Clear Proxy System ID for Area Proxy\n")
+{
+	struct isis_area *area = VTY_GET_CONTEXT(isis_area);
+
+	if (!area)
+		return CMD_WARNING;
+
+	memset(area->area_proxy_sysid, 0, ISIS_SYS_ID_LEN);
+	return CMD_SUCCESS;
+}
+
+DEFPY_NOSH(area_proxy_sid,
+	   area_proxy_sid_cmd,
+	   "area-sid (16-1048575)",
+	   "Configure Area SID for Area Proxy\n"
+	   "Area SID value (16-1048575)\n")
+{
+	struct isis_area *area = VTY_GET_CONTEXT(isis_area);
+
+	if (!area)
+		return CMD_WARNING;
+
+	if (!area->area_proxy_enabled) {
+		vty_out(vty,
+			"%% Area Proxy is not enabled. Enable with 'area-proxy' first.\n");
+		return CMD_WARNING;
+	}
+
+	if (isis_area_proxy_set_sid(area, area_sid) != 0) {
+		vty_out(vty, "%% Failed to set Area SID\n");
+		return CMD_WARNING;
+	}
+
+	return CMD_SUCCESS;
+}
+
+DEFPY_NOSH(no_area_proxy_sid,
+	   no_area_proxy_sid_cmd,
+	   "no area-sid",
+	   NO_STR
+	   "Clear Area SID for Area Proxy\n")
+{
+	struct isis_area *area = VTY_GET_CONTEXT(isis_area);
+
+	if (!area)
+		return CMD_WARNING;
+
+	isis_area_proxy_unset_sid(area);
+	return CMD_SUCCESS;
+}
+
 
 void isis_cli_init(void)
 {
@@ -3760,5 +3848,9 @@ void isis_cli_init(void)
 
 	install_element(ISIS_NODE, &area_proxy_cmd);
 	install_element(ISIS_NODE, &no_area_proxy_cmd);
+	install_element(ISIS_NODE, &area_proxy_sysid_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_sysid_cmd);
+	install_element(ISIS_NODE, &area_proxy_sid_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_sid_cmd);
 }
 #endif /* ifndef FABRICD */

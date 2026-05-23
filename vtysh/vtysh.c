@@ -2257,6 +2257,65 @@ DEFUNSH(VTYSH_ISISD, isis_srv6_node_msd, isis_srv6_node_msd_cmd,
 	vty->node = ISIS_SRV6_NODE_MSD_NODE;
 	return CMD_SUCCESS;
 }
+
+/* RFC 9666 Area Proxy */
+DEFUNSH(VTYSH_ISISD, area_proxy, area_proxy_cmd,
+       "area-proxy",
+       "Enable IS-IS Area Proxy (RFC 9666)\n")
+{
+       return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_ISISD, no_area_proxy, no_area_proxy_cmd,
+       "no area-proxy",
+       NO_STR
+       "Disable IS-IS Area Proxy (RFC 9666)\n")
+{
+       return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_ISISD, show_isis_area_proxy, show_isis_area_proxy_cmd,
+       "show isis [vrf <NAME|all>] area-proxy",
+       SHOW_STR
+       "IS-IS\n"
+       VRF_CMD_HELP_STR
+       "All VRFs\n"
+       "Area Proxy (RFC 9666) information\n")
+{
+       return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_ISISD, area_proxy_sysid, area_proxy_sysid_cmd,
+       "proxy-sysid WORD",
+       "Configure Proxy System ID for Area Proxy\n"
+       "Proxy System ID in XXXX.XXXX.XXXX format\n")
+{
+       return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_ISISD, no_area_proxy_sysid, no_area_proxy_sysid_cmd,
+       "no proxy-sysid",
+       NO_STR
+       "Clear Proxy System ID for Area Proxy\n")
+{
+       return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_ISISD, area_proxy_sid, area_proxy_sid_cmd,
+       "area-sid (16-1048575)",
+       "Configure Area SID for Area Proxy\n"
+       "Area SID value (16-1048575)\n")
+{
+       return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_ISISD, no_area_proxy_sid, no_area_proxy_sid_cmd,
+       "no area-sid",
+       NO_STR
+       "Clear Area SID for Area Proxy\n")
+{
+       return CMD_SUCCESS;
+}
 #endif /* HAVE_ISISD */
 
 #ifdef HAVE_FABRICD
@@ -5615,6 +5674,13 @@ void vtysh_init_vty(void)
 	install_element(ISIS_SRV6_NODE_MSD_NODE,
 			&vtysh_quit_isis_srv6_node_msd_cmd);
 	install_element(ISIS_SRV6_NODE_MSD_NODE, &vtysh_end_all_cmd);
+
+	install_element(ISIS_NODE, &area_proxy_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_cmd);
+	install_element(ISIS_NODE, &area_proxy_sysid_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_sysid_cmd);
+	install_element(ISIS_NODE, &area_proxy_sid_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_sid_cmd);
 #endif /* HAVE_ISISD */
 
 	/* fabricd */
@@ -5943,20 +6009,4 @@ void vtysh_init_vty(void)
 	install_element(CONFIG_NODE, &vtysh_enable_password_cmd);
 	install_element(CONFIG_NODE, &no_vtysh_enable_password_cmd);
 	install_element(CONFIG_NODE, &vtysh_exec_timeout_cmd);
-}
-
-/* RFC 9666 Area Proxy */
-DEFUNSH(VTYSH_ISISD, area_proxy, area_proxy_cmd,
-       "area-proxy",
-       "Enable IS-IS Area Proxy (RFC 9666)\n")
-{
-       return CMD_SUCCESS;
-}
-
-DEFUNSH(VTYSH_ISISD, no_area_proxy, no_area_proxy_cmd,
-       "no area-proxy",
-       NO_STR
-       "Disable IS-IS Area Proxy (RFC 9666)\n")
-{
-       return CMD_SUCCESS;
 }

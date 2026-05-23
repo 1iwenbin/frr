@@ -554,7 +554,8 @@ static struct isis_vertex *isis_spf_add2tent(struct isis_spftree *spftree, enum 
 					     void *id, uint32_t cost, int depth,
 					     struct isis_spf_adj *sadj,
 					     struct isis_prefix_sid *psid,
-					     struct isis_vertex *parent)
+					     struct isis_vertex *parent,
+					     uint8_t inter_area_inc)
 {
 	struct isis_vertex *vertex;
 	struct listnode *node;
@@ -579,6 +580,7 @@ static struct isis_vertex *isis_spf_add2tent(struct isis_spftree *spftree, enum 
 	vertex = isis_vertex_new(spftree, id, vtype);
 	vertex->d_N = cost;
 	vertex->depth = depth;
+	vertex->inter_area_count = parent ? parent->inter_area_count + inter_area_inc : inter_area_inc;
 	if (VTYPE_IP(vtype) && spftree->area->srdb.enabled && psid) {
 		struct isis_area *area = spftree->area;
 		struct isis_vertex *vertex_psid;
@@ -683,12 +685,13 @@ static void isis_spf_add_local(struct isis_spftree *spftree, enum vertextype vty
 		}
 	}
 
-	isis_spf_add2tent(spftree, vtype, id, cost, 1, sadj, psid, parent);
+	isis_spf_add2tent(spftree, vtype, id, cost, 1, sadj, psid, parent, 0);
 	return;
 }
 
 static void process_N(struct isis_spftree *spftree, enum vertextype vtype, void *id, uint32_t dist,
-		      uint16_t depth, struct isis_prefix_sid *psid, struct isis_vertex *parent)
+		      uint16_t depth, struct isis_prefix_sid *psid, struct isis_vertex *parent,
+		      uint8_t inter_area_inc)
 {
 	struct isis_vertex *vertex;
 #ifdef EXTREME_DEBUG
@@ -781,7 +784,7 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype, void 
 			   (parent ? print_sys_hostname(parent->N.id) : "null"));
 #endif /* EXTREME_DEBUG */
 
-	isis_spf_add2tent(spftree, vtype, id, dist, depth, NULL, psid, parent);
+	isis_spf_add2tent(spftree, vtype, id, dist, depth, NULL, psid, parent, inter_area_inc);
 	return;
 }
 
@@ -807,6 +810,28 @@ static int isis_spf_process_lsp(struct isis_spftree *spftree, struct isis_lsp *l
 				   print_sys_hostname(lsp->hdr.lsp_id));
 		return ISIS_OK;
 	}
+
+	/*
+	 * RFC 9666 Area Proxy:
+	 * Inside Router must ignore the Proxy LSP in its L2 SPF,
+	 * otherwise the Proxy (cost=0) would create a shorter path
+	 * than the actual internal topology, causing routing loops.
+	 * Outside Routers (area_proxy_enabled == false) process it normally.
+	 *
+	 * RFC 9666 §3.2: When an Outside Router processes a Proxy LSP,
+	 * all vertices reached through it carry inter_area_count+1.
+	 * Paths with lower inter_area_count always win in TENT comparison,
+	 * implementing "intra-area < inter-area" metric priority.
+	 */
+	if (isis_lsp_is_proxy_lsp(lsp) && spftree->area->area_proxy_enabled) {
+		if (IS_DEBUG_SPF_EVENTS)
+			zlog_debug("ISIS-SPF: skipping Proxy LSP %pLS (Inside Router)",
+				   lsp->hdr.lsp_id);
+		return ISIS_OK;
+	}
+
+	/* Outside Router: crossing a Proxy boundary increments inter-area count */
+	uint8_t inter_area_inc = isis_lsp_is_proxy_lsp(lsp) ? 1 : 0;
 
 	if (!lsp->tlvs)
 		return ISIS_OK;
@@ -862,7 +887,8 @@ lspfragloop:
 				process_N(spftree,
 					  LSP_PSEUDO_ID(r->id) ? VTYPE_PSEUDO_IS
 							       : VTYPE_NONPSEUDO_IS,
-					  (void *)r->id, dist, depth + 1, NULL, parent);
+					  (void *)r->id, dist, depth + 1, NULL, parent,
+					  inter_area_inc);
 			}
 		}
 
@@ -898,7 +924,7 @@ lspfragloop:
 				process_N(spftree,
 					  LSP_PSEUDO_ID(er->id) ? VTYPE_PSEUDO_TE_IS
 								: VTYPE_NONPSEUDO_TE_IS,
-					  (void *)er->id, dist, depth + 1, NULL, parent);
+					  (void *)er->id, dist, depth + 1, NULL, parent, inter_area_inc);
 			}
 		}
 	}
@@ -919,7 +945,7 @@ lspfragloop:
 				dist = cost + r->metric;
 				ip_info.dest.u.prefix4 = r->prefix.prefix;
 				ip_info.dest.prefixlen = r->prefix.prefixlen;
-				process_N(spftree, vtype, &ip_info, dist, depth + 1, NULL, parent);
+				process_N(spftree, vtype, &ip_info, dist, depth + 1, NULL, parent, inter_area_inc);
 			}
 		}
 	}
@@ -965,7 +991,7 @@ lspfragloop:
 
 					has_valid_psid = true;
 					process_N(spftree, VTYPE_IPREACH_TE, &ip_info, dist,
-						  depth + 1, psid, parent);
+						  depth + 1, psid, parent, inter_area_inc);
 					/*
 					 * Stop the Prefix-SID iteration since
 					 * we only support the SPF algorithm for
@@ -976,7 +1002,7 @@ lspfragloop:
 			}
 			if (!has_valid_psid)
 				process_N(spftree, VTYPE_IPREACH_TE, &ip_info, dist, depth + 1,
-					  NULL, parent);
+					  NULL, parent, inter_area_inc);
 		}
 	}
 
@@ -1031,7 +1057,7 @@ lspfragloop:
 
 					has_valid_psid = true;
 					process_N(spftree, vtype, &ip_info, dist, depth + 1, psid,
-						  parent);
+						  parent, inter_area_inc);
 					/*
 					 * Stop the Prefix-SID iteration since
 					 * we only support the SPF algorithm for
@@ -1041,7 +1067,7 @@ lspfragloop:
 				}
 			}
 			if (!has_valid_psid)
-				process_N(spftree, vtype, &ip_info, dist, depth + 1, NULL, parent);
+				process_N(spftree, vtype, &ip_info, dist, depth + 1, NULL, parent, inter_area_inc);
 		}
 
 		/* Process SRv6 Locator TLVs */
@@ -1080,7 +1106,7 @@ lspfragloop:
 			/* SRv6 locator not present in Prefix Reachability TLV,
 			 * let's process it */
 			if (!loc_is_in_ipv6_reach)
-				process_N(spftree, vtype, &ip_info, dist, depth + 1, NULL, parent);
+				process_N(spftree, vtype, &ip_info, dist, depth + 1, NULL, parent, inter_area_inc);
 		}
 	}
 
@@ -1106,7 +1132,8 @@ end:
 			ip_info.dest.family = AF_INET6;
 			vtype = VTYPE_IP6REACH_INTERNAL;
 		}
-		process_N(spftree, vtype, &ip_info, cost, depth + 1, NULL, parent);
+		process_N(spftree, vtype, &ip_info, cost, depth + 1, NULL, parent,
+		  inter_area_inc);
 	}
 
 	if (fragnode == NULL)

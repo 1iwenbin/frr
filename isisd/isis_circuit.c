@@ -38,6 +38,7 @@
 #include "isisd/isis_misc.h"
 #include "isisd/isis_constants.h"
 #include "isisd/isis_adjacency.h"
+#include "satellite_schedule.h"
 #include "isisd/isis_dr.h"
 #include "isisd/isisd.h"
 #include "isisd/isis_csm.h"
@@ -510,8 +511,19 @@ void isis_circuit_if_add(struct isis_circuit *circuit, struct interface *ifp)
 		circuit->circ_type = CIRCUIT_T_UNKNOWN;
 	}
 
-	frr_each (if_connected, ifp->connected, conn)
+	frr_each (if_connected, ifp->connected, conn) {
+		/* RFC 9717: unnumbered interface — skip IP address collection
+		 * but allow IS-IS to operate using System ID only */
+		if (CHECK_FLAG(conn->flags, ZEBRA_IFA_UNNUMBERED)) {
+			circuit->is_unnumbered = true;
+			continue;
+		}
 		isis_circuit_add_addr(circuit, conn);
+	}
+
+	/* Unnumbered: ensure ip_router is set so IS-IS operates */
+	if (circuit->is_unnumbered)
+		isis_circuit_af_set(circuit, true, true);
 }
 
 void isis_circuit_if_del(struct isis_circuit *circuit, struct interface *ifp)
@@ -1703,6 +1715,25 @@ void isis_reset_hello_timer(struct isis_circuit *circuit)
 	}
 }
 
+/* Phase 9: set overload bit on all IS-IS areas (for node schedule) */
+static int isis_area_overload_bit_set_all(bool overload)
+{
+	struct isis *isis;
+	struct isis_area *area;
+	int count = 0;
+
+	frr_each (isis_instance_list, &im->isis, isis) {
+		frr_each (isis_area_list, &isis->area_list, area) {
+			isis_area_overload_bit_set(area, overload);
+			count++;
+		}
+	}
+	return count;
+}
+
+/* Phase 6: forward declaration for schedule action callback */
+static void isis_schedule_action_cb(struct schedule_entry *entry);
+
 void isis_circuit_init(void)
 {
 	/* Initialize Zebra interface data structure */
@@ -1719,4 +1750,119 @@ void isis_circuit_init(void)
 	hook_register_prio(if_up, 0, isis_ifp_up);
 	hook_register_prio(if_down, 0, isis_ifp_down);
 	hook_register_prio(if_unreal, 0, isis_ifp_destroy);
+
+	/* Phase 6: register satellite schedule action callback */
+	schedule_action_hook = isis_schedule_action_cb;
+}
+
+/* ───────────────────────────────────────────────────────────
+ *  Phase 6: Satellite Link Schedule — metric helpers
+ *
+ *  Called by the satellite_schedule engine via callback to
+ *  dynamically adjust circuit metrics before/after ISL changes.
+ * ─────────────────────────────────────────────────────────── */
+
+static void isis_schedule_action_cb(struct schedule_entry *entry)
+{
+	switch (entry->action) {
+	case SCHEDULE_ACTION_METRIC_HIGH:
+		isis_circuit_sched_metric_set(entry->interface,
+					      entry->metric_value);
+		break;
+	case SCHEDULE_ACTION_METRIC_RESTORE:
+		isis_circuit_sched_metric_restore(entry->interface);
+		break;
+	case SCHEDULE_ACTION_LINK_DOWN:
+	case SCHEDULE_ACTION_LINK_UP:
+		/* Link state changes are handled by the simulation platform.
+		 * FRR will react to the Netlink events automatically. */
+		zlog_info("Satellite-Schedule: %s on '%s' — awaiting platform execution",
+			  entry->action == SCHEDULE_ACTION_LINK_DOWN
+				  ? "LINK_DOWN"
+				  : "LINK_UP",
+			  entry->interface);
+		break;
+	case SCHEDULE_ACTION_NODE_OVERLOAD:
+		/* RFC 9717: set overload bit to drain traffic before node offline */
+		if (isis_area_overload_bit_set_all(true))
+			zlog_info("Satellite-Schedule: overload bit set on all areas");
+		break;
+	case SCHEDULE_ACTION_NODE_NORMAL:
+		/* RFC 9717: clear overload bit when node comes back */
+		if (isis_area_overload_bit_set_all(false))
+			zlog_info("Satellite-Schedule: overload bit cleared on all areas");
+		break;
+	case SCHEDULE_ACTION_NONE:
+		break;
+	default:
+		break;
+	}
+}
+
+int isis_circuit_sched_metric_set(const char *ifname, uint32_t metric)
+{
+	struct interface *ifp;
+	struct isis_circuit *circuit;
+
+	ifp = if_lookup_by_name(ifname, VRF_DEFAULT);
+	if (!ifp) {
+		zlog_warn("Satellite-Schedule: interface '%s' not found", ifname);
+		return -1;
+	}
+
+	circuit = circuit_scan_by_ifp(ifp);
+	if (!circuit) {
+		zlog_warn("Satellite-Schedule: no IS-IS circuit on '%s'", ifname);
+		return -1;
+	}
+
+	/* Save original metric values for later restore */
+	circuit->saved_te_metric[ISIS_LEVEL1 - 1] = circuit->te_metric[ISIS_LEVEL1 - 1];
+	circuit->saved_te_metric[ISIS_LEVEL2 - 1] = circuit->te_metric[ISIS_LEVEL2 - 1];
+
+	/* Set new metric on all active levels */
+	circuit->te_metric[ISIS_LEVEL1 - 1] = metric;
+	circuit->te_metric[ISIS_LEVEL2 - 1] = metric;
+
+	/* Trigger LSP regeneration to advertise the new metric */
+	if (circuit->area)
+		lsp_regenerate_schedule(circuit->area, IS_LEVEL_1 | IS_LEVEL_2, 0);
+
+	zlog_info("Satellite-Schedule: metric on '%s' set to %u (saved: L1=%u L2=%u)",
+		  ifname, metric,
+		  circuit->saved_te_metric[0], circuit->saved_te_metric[1]);
+
+	return 0;
+}
+
+int isis_circuit_sched_metric_restore(const char *ifname)
+{
+	struct interface *ifp;
+	struct isis_circuit *circuit;
+
+	ifp = if_lookup_by_name(ifname, VRF_DEFAULT);
+	if (!ifp) {
+		zlog_warn("Satellite-Schedule: interface '%s' not found", ifname);
+		return -1;
+	}
+
+	circuit = circuit_scan_by_ifp(ifp);
+	if (!circuit) {
+		zlog_warn("Satellite-Schedule: no IS-IS circuit on '%s'", ifname);
+		return -1;
+	}
+
+	/* Restore saved metric values */
+	circuit->te_metric[ISIS_LEVEL1 - 1] = circuit->saved_te_metric[ISIS_LEVEL1 - 1];
+	circuit->te_metric[ISIS_LEVEL2 - 1] = circuit->saved_te_metric[ISIS_LEVEL2 - 1];
+
+	/* Trigger LSP regeneration to advertise the restored metric */
+	if (circuit->area)
+		lsp_regenerate_schedule(circuit->area, IS_LEVEL_1 | IS_LEVEL_2, 0);
+
+	zlog_info("Satellite-Schedule: metric on '%s' restored to L1=%u L2=%u",
+		  ifname,
+		  circuit->te_metric[0], circuit->te_metric[1]);
+
+	return 0;
 }

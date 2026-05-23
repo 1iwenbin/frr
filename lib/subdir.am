@@ -109,6 +109,8 @@ lib_libfrr_la_SOURCES = \
 	lib/sockopt.c \
 	lib/sockunion.c \
 	lib/spf_backoff.c \
+	lib/satellite_schedule.c \
+	lib/satellite_schedule_cli.c \
 	lib/segment_routing.c \
 	lib/srcdest_table.c \
 	lib/stream.c \
@@ -190,6 +192,7 @@ clippy_scan += \
 	lib/plist.c \
 	lib/routemap.c \
 	lib/routemap_cli.c \
+	lib/satellite_schedule_cli.c \
 	lib/event.c \
 	lib/vty.c \
 	lib/zlog_5424_cli.c \
@@ -296,6 +299,9 @@ nobase_pkginclude_HEADERS += \
 	lib/skiplist.h \
 	lib/smux.h \
 	lib/sockopt.h \
+	lib/sockunion.h \
+	lib/spf_backoff.h \
+	lib/satellite_schedule.h \
 	lib/sockunion.h \
 	lib/spf_backoff.h \
 	lib/segment_routing.h \

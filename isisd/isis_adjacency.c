@@ -37,6 +37,7 @@
 #include "isisd/isis_tlvs.h"
 #include "isisd/fabricd.h"
 #include "isisd/isis_nb.h"
+#include "isisd/isis_area_proxy.h"
 
 DEFINE_MTYPE_STATIC(ISISD, ISIS_ADJACENCY, "ISIS adjacency");
 DEFINE_MTYPE(ISISD, ISIS_ADJACENCY_INFO, "ISIS adjacency info");
@@ -432,6 +433,36 @@ void isis_adj_state_change(struct isis_adjacency **padj,
 	}
 
 	hook_call(isis_adj_state_change_hook, adj);
+
+	/*
+	 * RFC 9666 Area Proxy:
+	 * When an L2 adjacency comes UP with a neighbor NOT in our L1 LSDB,
+	 * mark the circuit as a boundary interface to the Outside.
+	 */
+	if (adj && adj->adj_state == ISIS_ADJ_UP
+	    && adj->circuit->area->area_proxy_enabled
+	    && (adj->level & ISIS_LEVEL2)
+	    && !isis_sysid_in_l1_lsdb(adj->circuit->area, adj->sysid)) {
+		if (!adj->circuit->is_area_proxy_boundary) {
+			adj->circuit->is_area_proxy_boundary = true;
+			zlog_info("Area Proxy: circuit %s marked as boundary (neighbor %pSY)",
+				  adj->circuit->interface->name, adj->sysid);
+
+			/*
+			 * Phase 5: New boundary detected — re-filter
+			 * all Inside LSPs so they are removed from this
+			 * circuit's tx_queue (and not sent to Outside).
+			 */
+			struct isis_lsp *lsp;
+			frr_each (lspdb,
+				  &adj->circuit->area->lspdb[ISIS_LEVEL2 - 1],
+				  lsp) {
+				if (isis_lsp_is_proxy_lsp(lsp))
+					continue;
+				lsp_set_all_srmflags(lsp, true);
+			}
+		}
+	}
 
 	if (del) {
 		isis_delete_adj(adj);

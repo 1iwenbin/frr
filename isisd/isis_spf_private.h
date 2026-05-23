@@ -64,6 +64,7 @@ struct isis_vertex {
 	struct hash *firsthops; /* first two hops to neighbor */
 	uint64_t insert_counter;
 	uint8_t flags;
+	uint8_t inter_area_count;  /* RFC 9666 §3.2: number of Area Proxy boundaries crossed */
 };
 #define F_ISIS_VERTEX_LFA_PROTECTED 0x01
 
@@ -119,6 +120,17 @@ __attribute__((__unused__)) static int isis_vertex_queue_tent_cmp(const void *a,
 {
 	const struct isis_vertex *va = a;
 	const struct isis_vertex *vb = b;
+
+	/*
+	 * RFC 9666 §3.2: intra-area metrics MUST be treated as less
+	 * than any inter-area metric.  Paths that cross fewer Area
+	 * Proxy boundaries are preferred, regardless of total metric.
+	 */
+	if (va->inter_area_count < vb->inter_area_count)
+		return -1;
+
+	if (va->inter_area_count > vb->inter_area_count)
+		return 1;
 
 	if (va->d_N < vb->d_N)
 		return -1;

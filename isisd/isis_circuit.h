@@ -134,9 +134,11 @@ struct isis_circuit {
 	uint16_t psnp_interval[ISIS_LEVELS];	/* psnp-interval in seconds */
 	uint8_t metric[ISIS_LEVELS];
 	uint32_t te_metric[ISIS_LEVELS];
+	uint32_t saved_te_metric[ISIS_LEVELS];  /* Phase 6: saved metric for link schedule restore */
 	struct isis_ext_subtlvs *ext; /* Extended parameters (TE + Adj SID */
 	int ip_router;		      /* Route IP ? */
 	int is_passive;		      /* Is Passive ? */
+	bool is_unnumbered;           /* Unnumbered interface (RFC 9717) */
 	struct list *mt_settings;     /* IS-IS MT Settings */
 	struct list *ip_addrs;	      /* our IP addresses */
 	int ipv6_router;	      /* Route IPv6 ? */
@@ -176,6 +178,9 @@ struct isis_circuit {
 	uint32_t max_area_addr_mismatches; /* max-area-addresses-mismatch */
 	uint32_t auth_type_failures;	   /*authentication-type-fails */
 	uint32_t auth_failures;		   /* authentication-fails */
+
+	/* === RFC 9666 Area Proxy === */
+	bool is_area_proxy_boundary; /* 边界接口：连接 Outside Router */
 
 	uint32_t snmp_id; /* Circuit id in snmp */
 
@@ -243,5 +248,9 @@ DECLARE_HOOK(isis_circuit_add_addr_hook, (struct isis_circuit *circuit), (circui
 
 DECLARE_HOOK(isis_circuit_new_hook, (struct isis_circuit *circuit), (circuit));
 DECLARE_HOOK(isis_circuit_del_hook, (struct isis_circuit *circuit), (circuit));
+
+/* === Phase 6: Satellite Link Schedule metric helpers === */
+int isis_circuit_sched_metric_set(const char *ifname, uint32_t metric);
+int isis_circuit_sched_metric_restore(const char *ifname);
 
 #endif /* _ZEBRA_ISIS_CIRCUIT_H */

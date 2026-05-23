@@ -46,6 +46,7 @@
 #include "isisd/fabricd.h"
 #include "isisd/isis_tx_queue.h"
 #include "isisd/isis_nb.h"
+#include "isisd/isis_area_proxy.h"
 #include "isisd/isis_flex_algo.h"
 
 DEFINE_MTYPE_STATIC(ISISD, ISIS_LSP, "ISIS LSP");
@@ -2278,6 +2279,36 @@ void lsp_set_all_srmflags(struct isis_lsp *lsp, bool set)
 
 	frr_each (isis_circuit_list, &lsp->area->circuit_list, circuit) {
 		if (set) {
+			/*
+			 * RFC 9666 Area Proxy: skip boundary circuits for Inside LSPs.
+			 */
+			if (lsp->area->area_proxy_enabled
+			    && !isis_lsp_is_proxy_lsp(lsp)
+			    && isis_sysid_in_l1_lsdb(lsp->area, lsp->hdr.lsp_id)) {
+				bool skip = false;
+				if (circuit->circ_type == CIRCUIT_T_P2P
+				    && circuit->u.p2p.neighbor
+				    && circuit->u.p2p.neighbor->adj_state == ISIS_ADJ_UP
+				    && !isis_sysid_in_l1_lsdb(lsp->area,
+						circuit->u.p2p.neighbor->sysid))
+					skip = true;
+				else if (circuit->circ_type == CIRCUIT_T_BROADCAST) {
+					struct listnode *node;
+					struct isis_adjacency *adj;
+					for (ALL_LIST_ELEMENTS_RO(
+						     circuit->u.bc.adjdb[ISIS_LEVEL2 - 1],
+						     node, adj))
+						if (adj->adj_state == ISIS_ADJ_UP
+						    && !isis_sysid_in_l1_lsdb(
+							    lsp->area, adj->sysid)) {
+							skip = true;
+							break;
+						}
+				}
+				if (skip)
+					continue;
+			}
+
 			isis_tx_queue_add(circuit->tx_queue, lsp,
 					  TX_LSP_NORMAL);
 		} else {
@@ -2294,6 +2325,19 @@ void _lsp_flood(struct isis_lsp *lsp, struct isis_circuit *circuit,
 			   lsp->hdr.lsp_id, circuit ? " except on " : "",
 			   circuit ? circuit->interface->name : "", func, file,
 			   line);
+	}
+
+	/*
+	 * RFC 9666 Area Proxy — Boundary Flood Filter:
+	 * Do NOT flood this LSP out boundary interfaces if:
+	 *   - Area Proxy is enabled
+	 *   - The LSP's Source ID belongs to an Inside Router (not Proxy)
+	 */
+	if (lsp->area && lsp->area->area_proxy_enabled
+	    && !isis_lsp_is_proxy_lsp(lsp)
+	    && isis_sysid_in_l1_lsdb(lsp->area, lsp->hdr.lsp_id)) {
+		/* This is an Inside Router's L2 LSP → skip boundary circuits */
+		/* The filter is applied per-circuit in SRM setting below */
 	}
 
 	if (!fabricd)
@@ -2521,6 +2565,45 @@ int isis_lsp_iterate_is_reach(struct isis_lsp *lsp, uint16_t mtid,
 		}
 
 	return LSP_ITER_CONTINUE;
+}
+
+/* RFC 9666: Check if an LSP is a Proxy LSP by matching its source System ID
+ * against the area's configured proxy_sysid. */
+bool isis_lsp_is_proxy_lsp(const struct isis_lsp *lsp)
+{
+	if (!lsp || !lsp->area)
+		return false;
+	if (!lsp->area->area_proxy_enabled)
+		return false;
+
+	return (memcmp(lsp->hdr.lsp_id, lsp->area->area_proxy_sysid,
+		       ISIS_SYS_ID_LEN) == 0);
+}
+
+/*
+ * Build a complete LSP PDU from pre-constructed TLVs.
+ * This is used by Area Proxy to generate Proxy LSPs.
+ * The LSP must already have tlvs assigned.
+ */
+void lsp_build_from_tlvs(struct isis_lsp *lsp)
+{
+	if (!lsp || !lsp->tlvs)
+		return;
+
+	size_t len_pointer;
+
+	/* Reset the stream and write a fresh LSP header */
+	lsp_adjust_stream(lsp);
+	put_lsp_hdr(lsp, &len_pointer, false);
+
+	/* Pack TLVs into the stream after the header */
+	isis_pack_tlvs(lsp->tlvs, lsp->pdu, len_pointer, false, true);
+
+	/* Update PDU length and compute checksum */
+	lsp->hdr.pdu_len = stream_get_endp(lsp->pdu);
+	lsp->hdr.checksum =
+		ntohs(fletcher_checksum(STREAM_DATA(lsp->pdu) + 12,
+					stream_get_endp(lsp->pdu) - 12, 12));
 }
 
 void lsp_init(void)

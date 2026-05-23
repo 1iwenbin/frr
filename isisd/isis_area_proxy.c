@@ -16,6 +16,8 @@
 #include "isisd/isis_tlvs.h"
 #include "isisd/isis_lsp.h"
 #include "isisd/isis_misc.h"
+#include "isisd/isis_mt.h"
+#include "isisd/isis_adjacency.h"
 
 void isis_area_proxy_enable(struct isis_area *area)
 {
@@ -24,11 +26,64 @@ void isis_area_proxy_enable(struct isis_area *area)
 
 	area->area_proxy_enabled = true;
 
-	zlog_info("Area Proxy: enabled on area %s (proxy-sysid: %pIS)",
+	zlog_info("Area Proxy: enabled on area %s (proxy-sysid: %pSY)",
 		  area->area_tag, area->area_proxy_sysid);
 
-	/* Schedule LSP regeneration to include Area Proxy TLV */
-	lsp_regenerate_schedule(area, ISIS_LEVEL2, 0);
+	/*
+	 * Phase 5: Scan existing circuits for boundary interfaces.
+	 * When a boundary circuit is found, isis_adjacency.c will
+	 * automatically re-filter all Inside LSPs from it.
+	 */
+	{
+		struct isis_circuit *circuit;
+		frr_each (isis_circuit_list, &area->circuit_list, circuit) {
+			if ((circuit->is_type & IS_LEVEL_2) == 0)
+				continue;
+			/* Check L2 adjacencies for Outside neighbors */
+			struct listnode *node;
+			struct isis_adjacency *adj;
+			int lvl = ISIS_LEVEL2 - 1;
+			if (circuit->circ_type == CIRCUIT_T_BROADCAST) {
+				for (ALL_LIST_ELEMENTS_RO(
+					     circuit->u.bc.adjdb[lvl],
+					     node, adj)) {
+					if (adj->adj_state == ISIS_ADJ_UP
+					    && !isis_sysid_in_l1_lsdb(
+						    area, adj->sysid)) {
+						circuit->is_area_proxy_boundary = true;
+						zlog_info("Area Proxy: circuit %s boundary (neighbor %pSY)",
+							  circuit->interface->name, adj->sysid);
+						break;
+					}
+				}
+			} else if (circuit->circ_type == CIRCUIT_T_P2P
+				   && circuit->u.p2p.neighbor
+				   && circuit->u.p2p.neighbor->adj_state == ISIS_ADJ_UP
+				   && !isis_sysid_in_l1_lsdb(
+					   area, circuit->u.p2p.neighbor->sysid)) {
+				circuit->is_area_proxy_boundary = true;
+				zlog_info("Area Proxy: circuit %s boundary (neighbor %pSY)",
+					  circuit->interface->name,
+					  circuit->u.p2p.neighbor->sysid);
+			}
+		}
+	}
+
+	/*
+	 * Phase 5: Re-flood all L2 LSPs — handled in isis_adjacency.c
+	 * when the first boundary circuit is detected.
+	 */
+
+	/* Generate Proxy LSP if sysid is already configured */
+	bool sysid_zero = true;
+	for (int i = 0; i < ISIS_SYS_ID_LEN; i++) {
+		if (area->area_proxy_sysid[i] != 0) {
+			sysid_zero = false;
+			break;
+		}
+	}
+	if (!sysid_zero)
+		isis_area_proxy_lsp_generate(area);
 }
 
 void isis_area_proxy_disable(struct isis_area *area)
@@ -75,7 +130,7 @@ void isis_area_proxy_show(struct vty *vty, const struct isis_area *area)
 		area->area_proxy_enabled ? "Enabled" : "Disabled");
 
 	if (area->area_proxy_enabled) {
-		vty_out(vty, "  Proxy System ID: %pIS\n",
+		vty_out(vty, "  Proxy System ID: %pSY\n",
 			area->area_proxy_sysid);
 		if (area->area_proxy_sid)
 			vty_out(vty, "  Area SID: %u\n",
@@ -85,4 +140,432 @@ void isis_area_proxy_show(struct vty *vty, const struct isis_area *area)
 		else
 			vty_out(vty, "  Proxy LSP: not generated\n");
 	}
+}
+
+int isis_area_proxy_set_sysid(struct isis_area *area, const char *sysid_str)
+{
+	if (!area || !area->area_proxy_enabled)
+		return -1;
+
+	if (!sysid_str || strlen(sysid_str) == 0)
+		return -1;
+
+	uint8_t sysid[ISIS_SYS_ID_LEN];
+	if (!sysid2buff(sysid, sysid_str)) {
+		zlog_warn("Area Proxy: invalid proxy-sysid format: %s", sysid_str);
+		return -1;
+	}
+
+	memcpy(area->area_proxy_sysid, sysid, ISIS_SYS_ID_LEN);
+
+	zlog_info("Area Proxy: set proxy-sysid to %pSY on area %s",
+		  area->area_proxy_sysid, area->area_tag);
+
+	/* Generate Proxy LSP now that sysid is configured */
+	isis_area_proxy_lsp_generate(area);
+
+	return 0;
+}
+
+int isis_area_proxy_set_sid(struct isis_area *area, uint32_t sid)
+{
+	if (!area || !area->area_proxy_enabled)
+		return -1;
+
+	area->area_proxy_sid = sid;
+
+	zlog_info("Area Proxy: set area-sid to %u on area %s",
+		  sid, area->area_tag);
+
+	/* Regenerate Proxy LSP with updated Area SID */
+	isis_area_proxy_lsp_generate(area);
+
+	return 0;
+}
+
+int isis_area_proxy_unset_sid(struct isis_area *area)
+{
+	if (!area)
+		return -1;
+
+	area->area_proxy_sid = 0;
+
+	zlog_info("Area Proxy: unset area-sid on area %s", area->area_tag);
+
+	lsp_regenerate_schedule(area, ISIS_LEVEL2, 0);
+
+	return 0;
+}
+
+/* ────────────────────────────────────────────
+ * Aggregation Algorithm — Step 1 ~ Step 6
+ * ──────────────────────────────────────────── */
+
+/*
+ * Check if a System ID belongs to an Inside Router (exists in L1 LSDB).
+ * Used by boundary filtering to identify Outside vs Inside neighbors.
+ */
+bool isis_sysid_in_l1_lsdb(struct isis_area *area, const uint8_t *sysid)
+{
+	struct isis_lsp *lsp;
+
+	frr_each (lspdb, &area->lspdb[ISIS_LEVEL1 - 1], lsp) {
+		if (memcmp(lsp->hdr.lsp_id, sysid, ISIS_SYS_ID_LEN) == 0)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * A simple entry for prefix aggregation: tracks the minimum metric
+ * for each unique prefix.
+ */
+struct prefix_agg_entry {
+	struct prefix prefix;
+	uint32_t min_metric;
+	bool has_min;
+};
+
+#define PREFIX_AGG_MAX 1024
+
+struct prefix_agg_table {
+	struct prefix_agg_entry entries[PREFIX_AGG_MAX];
+	int count;
+};
+
+static struct prefix_agg_entry *prefix_agg_lookup(struct prefix_agg_table *tbl,
+						   const struct prefix *p)
+{
+	for (int i = 0; i < tbl->count; i++) {
+		if (prefix_same(&tbl->entries[i].prefix, p))
+			return &tbl->entries[i];
+	}
+	return NULL;
+}
+
+static struct prefix_agg_entry *prefix_agg_add(struct prefix_agg_table *tbl,
+						const struct prefix *p)
+{
+	if (tbl->count >= PREFIX_AGG_MAX)
+		return NULL;
+	struct prefix_agg_entry *e = &tbl->entries[tbl->count++];
+	prefix_copy(&e->prefix, p);
+	e->min_metric = UINT32_MAX;
+	e->has_min = false;
+	return e;
+}
+
+/*
+ * Callback: collect IP prefixes from L1 LSDB.
+ */
+static int proxy_aggregate_ip_reach_cb(const struct prefix *prefix,
+					uint32_t metric, bool external,
+					struct isis_subtlvs *subtlvs,
+					void *arg)
+{
+	struct prefix_agg_table *tbl = arg;
+	struct prefix_agg_entry *e = prefix_agg_lookup(tbl, prefix);
+
+	if (!e) {
+		e = prefix_agg_add(tbl, prefix);
+		if (!e)
+			return LSP_ITER_STOP;
+	}
+
+	if (!e->has_min || metric < e->min_metric) {
+		e->min_metric = metric;
+		e->has_min = true;
+	}
+
+	return LSP_ITER_CONTINUE;
+}
+
+/*
+ * Step 1~6: Aggregate L1 LSDB into a single Proxy LSP's TLVs.
+ *
+ *   Step 1 — Basic TLVs (Protocols Supported, Area Addresses, Hostname)
+ *   Step 2 — Boundary IS Neighbors (Inside Edge → Outside Edge only)
+ *   Step 3 — IP Reachability (min metric per prefix)
+ *   Step 4 — Router Capability (SR/SRv6/TE)
+ *   Step 5 — Multi-Topology
+ *   Step 6 — Area SID
+ */
+struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
+{
+	struct isis_tlvs *proxy_tlvs;
+	struct isis_lsp *lsp;
+
+	if (!area || !area->area_proxy_enabled)
+		return NULL;
+
+	proxy_tlvs = isis_alloc_tlvs();
+	if (!proxy_tlvs)
+		return NULL;
+
+	zlog_debug("Area Proxy: aggregating TLVs for area %s", area->area_tag);
+
+	/* KNOWN LIMITATIONS (Phase 9):
+	 * - Step 4 (Router Capability: SR/SRv6/TE) not aggregated
+	 * - Step 5 (Multi-Topology) not aggregated
+	 * Enable when SR-TE or MT is needed.
+	 */
+
+	/* ================================================================
+	 * STEP 1: Basic TLVs
+	 * ================================================================ */
+
+	/* 1a. Protocols Supported TLV (129) */
+	{
+		struct nlpids nlp = {};
+		nlp.count = 2;
+		nlp.nlpids[0] = 0xCC; /* IPv4 */
+		nlp.nlpids[1] = 0x8E; /* IPv6 */
+		isis_tlvs_set_protocols_supported(proxy_tlvs, &nlp);
+	}
+
+	/* 1b. Area Addresses TLV (1) — copy from area config */
+	if (iso_address_list_first(&area->area_addrs))
+		isis_tlvs_add_area_addresses(proxy_tlvs, &area->area_addrs);
+
+	/* 1c. Dynamic Hostname TLV (137) */
+	{
+		char hostname[256];
+		snprintf(hostname, sizeof(hostname),
+			 "PROXY-%s", area->area_tag);
+		isis_tlvs_set_dynamic_hostname(proxy_tlvs, hostname);
+	}
+
+	/* ================================================================
+	 * STEP 2: Boundary IS Neighbors
+	 *
+	 * Iterate L2 LSDB. For each Inside Edge Router's LSP,
+	 * extract only the IS neighbors that point OUTSIDE the area
+	 * (i.e., not in L1 LSDB).
+	 * ================================================================ */
+
+	frr_each (lspdb, &area->lspdb[ISIS_LEVEL2 - 1], lsp) {
+		uint8_t *src_id = lsp->hdr.lsp_id;
+
+		/* Skip Proxy LSP itself */
+		if (isis_lsp_is_proxy_lsp(lsp))
+			continue;
+
+		/* Only Inside Edge Routers have L2 LSPs */
+		if (!isis_sysid_in_l1_lsdb(area, src_id))
+			continue;
+
+		/* Skip expired LSPs */
+		if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0)
+			continue;
+
+		/* Iterate extended IS reachability */
+		if (!lsp->tlvs)
+			continue;
+
+		struct isis_extended_reach *reach;
+		for (reach = (struct isis_extended_reach *)
+				lsp->tlvs->extended_reach.head;
+		     reach; reach = reach->next) {
+			/* Skip neighbors that are INSIDE the area */
+			if (isis_sysid_in_l1_lsdb(area, reach->id))
+				continue;
+
+			/* This neighbor is OUTSIDE — keep it */
+			isis_tlvs_add_extended_reach(
+				proxy_tlvs, ISIS_MT_IPV4_UNICAST,
+				reach->id, reach->metric, NULL);
+		}
+	}
+
+	/* ================================================================
+	 * STEP 3: IP Reachability
+	 *
+	 * Iterate L1 LSDB, collect all IPv4/IPv6 prefixes,
+	 * choose the minimum metric for each.
+	 * ================================================================ */
+
+	{
+		struct prefix_agg_table pat = {};
+
+		/* Collect from L1 LSDB */
+		frr_each (lspdb, &area->lspdb[ISIS_LEVEL1 - 1], lsp) {
+			if (lsp->hdr.seqno == 0 ||
+			    lsp->hdr.rem_lifetime == 0)
+				continue;
+
+			isis_lsp_iterate_ip_reach(
+				lsp, AF_INET, ISIS_MT_IPV4_UNICAST,
+				proxy_aggregate_ip_reach_cb, &pat);
+			isis_lsp_iterate_ip_reach(
+				lsp, AF_INET6, ISIS_MT_IPV4_UNICAST,
+				proxy_aggregate_ip_reach_cb, &pat);
+		}
+
+		/* Write collected prefixes to Proxy LSP */
+		for (int i = 0; i < pat.count; i++) {
+			struct prefix_agg_entry *e = &pat.entries[i];
+			if (!e->has_min)
+				continue;
+
+			if (e->prefix.family == AF_INET) {
+				struct prefix_ipv4 *p4 =
+					(struct prefix_ipv4 *)&e->prefix;
+				isis_tlvs_add_extended_ip_reach(
+					proxy_tlvs, p4, e->min_metric,
+					false, NULL);
+			} else if (e->prefix.family == AF_INET6) {
+				struct prefix_ipv6 *p6 =
+					(struct prefix_ipv6 *)&e->prefix;
+				isis_tlvs_add_ipv6_reach(
+					proxy_tlvs, ISIS_MT_IPV4_UNICAST,
+					p6, e->min_metric, false, NULL);
+			}
+		}
+	}
+
+	/* ================================================================
+	 * STEP 4: Router Capability TLV (242) — skip for MVP-1
+	 * ================================================================ */
+
+	/* ================================================================
+	 * STEP 5: Multi-Topology — skip for MVP-1
+	 * ================================================================ */
+
+	/* ================================================================
+	 * STEP 6: Area SID — implemented via Area Proxy TLV (Type 20).
+	 * Encoded/decoded during isis_pack_tlvs/isis_unpack_tlvs.
+	 * The area_sid value from area_proxy configuration is stored in
+	 * the TLV and accessible to Outside Routers for SR anycast.
+	 * ================================================================ */
+
+	return proxy_tlvs;
+}
+
+/* ────────────────────────────────────────────
+ * Proxy LSP Generation
+ * ──────────────────────────────────────────── */
+
+/*
+ * Timer callback for scheduled Proxy LSP regeneration.
+ */
+static void isis_area_proxy_lsp_regenerate_timer(struct event *t)
+{
+	struct isis_area *area = EVENT_ARG(t);
+
+	area->t_proxy_lsp_refresh = NULL;
+
+	zlog_debug("Area Proxy: timer fired, regenerating Proxy LSP for area %s",
+		   area->area_tag);
+
+	isis_area_proxy_lsp_generate(area);
+}
+
+/*
+ * Generate (or regenerate) the Proxy LSP from aggregated TLVs,
+ * then flood it to all L2 neighbors.
+ */
+int isis_area_proxy_lsp_generate(struct isis_area *area)
+{
+	struct isis_lsp *lsp;
+	struct isis_tlvs *tlvs;
+	uint8_t lsp_id[ISIS_SYS_ID_LEN + 2];
+
+	if (!area || !area->area_proxy_enabled)
+		return -1;
+
+	/* Check if proxy_sysid is configured */
+	bool sysid_zero = true;
+	for (int i = 0; i < ISIS_SYS_ID_LEN; i++) {
+		if (area->area_proxy_sysid[i] != 0) {
+			sysid_zero = false;
+			break;
+		}
+	}
+	if (sysid_zero) {
+		zlog_warn("Area Proxy: cannot generate Proxy LSP, "
+			  "proxy-sysid is not configured");
+		return -1;
+	}
+
+	/* Aggregate L1 LSDB into Proxy TLVs */
+	tlvs = isis_area_proxy_aggregate_tlvs(area);
+	if (!tlvs) {
+		zlog_warn("Area Proxy: aggregation returned NULL TLVs");
+		return -1;
+	}
+
+	/* Build LSP ID: proxy_sysid + pseudo_id=0 + frag_id=0 */
+	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
+	lsp_id[ISIS_SYS_ID_LEN] = 0;     /* pseudo ID */
+	lsp_id[ISIS_SYS_ID_LEN + 1] = 0; /* fragment ID */
+
+	/* Remove old Proxy LSP from LSDB if it exists */
+	if (area->proxy_lsp[ISIS_LEVEL2 - 1]) {
+		struct isis_lsp *old = area->proxy_lsp[ISIS_LEVEL2 - 1];
+		lspdb_del(&area->lspdb[ISIS_LEVEL2 - 1], old);
+		lsp_free(old);
+		area->proxy_lsp[ISIS_LEVEL2 - 1] = NULL;
+
+		zlog_debug("Area Proxy: removed old Proxy LSP from LSDB");
+	}
+
+	/* Create new Proxy LSP */
+	lsp = lsp_new(area, lsp_id,
+		      area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
+		      1,                 /* seqno starts at 1 */
+		      0,                 /* lsp_bits */
+		      0,                 /* checksum (computed later) */
+		      NULL,              /* lsp0 */
+		      ISIS_LEVEL2);
+	if (!lsp) {
+		isis_free_tlvs(tlvs);
+		return -1;
+	}
+
+	lsp->tlvs = tlvs;
+	lsp->own_lsp = 0; /* not "our own" LSP */
+	area->proxy_lsp[ISIS_LEVEL2 - 1] = lsp;
+
+	/* Insert into L2 LSDB */
+	lsp_insert(&area->lspdb[ISIS_LEVEL2 - 1], lsp);
+
+	zlog_info("Area Proxy: generated/regenerated Proxy LSP %pLS", lsp_id);
+
+	/* Build the PDU from our aggregated TLVs */
+	lsp_build_from_tlvs(lsp);
+
+	/* Flood to all L2 circuits */
+	{
+		struct isis_circuit *circuit;
+		frr_each (isis_circuit_list, &area->circuit_list, circuit) {
+			if (circuit->is_passive)
+				continue;
+			lsp_flood(lsp, circuit);
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * Schedule a (delayed) regeneration of the Proxy LSP.
+ * Should be called after L1 topology changes to batch updates.
+ */
+void isis_area_proxy_lsp_regenerate_schedule(struct isis_area *area)
+{
+	if (!area || !area->area_proxy_enabled)
+		return;
+
+	/* If a timer is already pending, leave it */
+	if (area->t_proxy_lsp_refresh)
+		return;
+
+	/* Schedule regeneration after a short delay (2 seconds)
+	 * to batch multiple L1 topology changes */
+	event_add_timer(master,
+			isis_area_proxy_lsp_regenerate_timer,
+			area, 2, &area->t_proxy_lsp_refresh);
+
+	zlog_debug("Area Proxy: scheduled Proxy LSP regeneration for area %s",
+		   area->area_tag);
 }
