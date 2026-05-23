@@ -114,6 +114,7 @@ ISIS_SOURCES = \
 	isisd/isis_dlpi.c \
 	isisd/isis_main.c \
 	isisd/isis_pfpacket.c \
+	isisd/isis_schedule.c \
 	# end
 
 ISIS_LDADD_COMMON = lib/libfrr.la $(LIBCAP) $(LIBYANG_LIBS)

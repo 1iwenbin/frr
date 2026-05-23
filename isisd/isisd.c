@@ -64,6 +64,7 @@
 #include "isisd/isis_sr.h"
 #include "isisd/fabricd.h"
 #include "isisd/isis_nb.h"
+#include "isisd/isis_area_proxy.h"
 
 /* For debug statement. */
 unsigned long debug_adj_pkt;
@@ -2873,6 +2874,49 @@ DEFUN(show_database, show_database_cmd,
 	return res;
 }
 
+/* ────────── RFC 9666 Area Proxy ────────── */
+
+DEFUN(show_isis_area_proxy,
+      show_isis_area_proxy_cmd,
+      "show " PROTO_NAME " [vrf <NAME|all>] area-proxy",
+      SHOW_STR PROTO_HELP VRF_CMD_HELP_STR
+      "All VRFs\n"
+      "Area Proxy (RFC 9666) information\n")
+{
+	const char *vrf_name = VRF_DEFAULT_NAME;
+	bool all_vrf = false;
+	int idx_vrf = 0;
+
+	ISIS_FIND_VRF_ARGS(argv, argc, idx_vrf, vrf_name, all_vrf);
+
+	if (!im) {
+		vty_out(vty, PROTO_NAME " is not running\n");
+		return CMD_SUCCESS;
+	}
+
+	if (all_vrf) {
+		struct isis *isis;
+		frr_each (isis_instance_list, &im->isis, isis) {
+			struct isis_area *area;
+			frr_each (isis_area_list, &isis->area_list, area)
+				isis_area_proxy_show(vty, area);
+		}
+		return CMD_SUCCESS;
+	}
+
+	struct isis *isis = isis_lookup_by_vrfname(vrf_name);
+	if (isis) {
+		struct isis_area *area;
+		frr_each (isis_area_list, &isis->area_list, area)
+			isis_area_proxy_show(vty, area);
+	} else {
+		vty_out(vty, "IS-IS instance not found for VRF %s\n",
+			vrf_name);
+	}
+
+	return CMD_SUCCESS;
+}
+
 #ifdef FABRICD
 /*
  * 'router openfabric' command
@@ -3621,6 +3665,7 @@ void isis_init(void)
 	install_element(ENABLE_NODE, &clear_isis_neighbor_arg_cmd);
 
 	install_element(VIEW_NODE, &show_hostname_cmd);
+	install_element(VIEW_NODE, &show_isis_area_proxy_cmd);
 	install_element(VIEW_NODE, &show_database_cmd);
 
 	install_element(ENABLE_NODE, &show_debugging_isis_cmd);

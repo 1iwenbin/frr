@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IS-IS Rout(e)ing protocol - isis_circuit.h
  *
  * Copyright (C) 2001,2002   Sampo Saaristo
  *                           Tampere University of Technology
  *                           Institute of Communications Engineering
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public Licenseas published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 #include <zebra.h>
 #ifdef GNU_LINUX
@@ -32,13 +19,14 @@
 #include "if.h"
 #include "linklist.h"
 #include "command.h"
-#include "thread.h"
+#include "frrevent.h"
 #include "vty.h"
 #include "hash.h"
 #include "prefix.h"
 #include "stream.h"
 #include "qobj.h"
 #include "lib/northbound_cli.h"
+#include "lib/json.h"
 
 #include "isisd/isis_constants.h"
 #include "isisd/isis_common.h"
@@ -50,10 +38,12 @@
 #include "isisd/isis_misc.h"
 #include "isisd/isis_constants.h"
 #include "isisd/isis_adjacency.h"
+#include "satellite_schedule.h"
 #include "isisd/isis_dr.h"
 #include "isisd/isisd.h"
 #include "isisd/isis_csm.h"
 #include "isisd/isis_events.h"
+#include "isisd/isis_srv6.h"
 #include "isisd/isis_te.h"
 #include "isisd/isis_mt.h"
 #include "isisd/isis_errors.h"
@@ -120,7 +110,7 @@ struct isis_circuit *isis_circuit_new(struct interface *ifp, const char *tag)
 		"/frr-interface:lib/interface/frr-isisd:isis/circuit-type");
 	circuit->flags = 0;
 
-	circuit->pad_hellos = yang_get_default_bool(
+	circuit->pad_hellos = yang_get_default_enum(
 		"/frr-interface:lib/interface/frr-isisd:isis/hello/padding");
 	circuit->hello_interval[0] = yang_get_default_uint32(
 		"/frr-interface:lib/interface/frr-isisd:isis/hello/interval/level-1");
@@ -158,7 +148,7 @@ struct isis_circuit *isis_circuit_new(struct interface *ifp, const char *tag)
 #else
 	circuit->is_type_config = IS_LEVEL_1_AND_2;
 	circuit->flags = 0;
-	circuit->pad_hellos = 1;
+	circuit->pad_hellos = ISIS_HELLO_PADDING_ALWAYS;
 	for (i = 0; i < 2; i++) {
 		circuit->hello_interval[i] = DEFAULT_HELLO_INTERVAL;
 		circuit->hello_multiplier[i] = DEFAULT_HELLO_MULTIPLIER;
@@ -210,8 +200,8 @@ void isis_circuit_del(struct isis_circuit *circuit)
 	ldp_sync_info_free(&circuit->ldp_sync_info);
 
 	circuit_mt_finish(circuit);
-	isis_lfa_excluded_ifaces_clear(circuit, ISIS_LEVEL1);
-	isis_lfa_excluded_ifaces_clear(circuit, ISIS_LEVEL2);
+	isis_lfa_excluded_ifaces_delete(circuit, ISIS_LEVEL1);
+	isis_lfa_excluded_ifaces_delete(circuit, ISIS_LEVEL2);
 
 	list_delete(&circuit->ip_addrs);
 	list_delete(&circuit->ipv6_link);
@@ -222,7 +212,7 @@ void isis_circuit_del(struct isis_circuit *circuit)
 		circuit->ext = NULL;
 	}
 
-	XFREE(MTYPE_TMP, circuit->bfd_config.profile);
+	XFREE(MTYPE_ISIS_BFD_PROFILE, circuit->bfd_config.profile);
 	XFREE(MTYPE_ISIS_CIRCUIT, circuit->tag);
 
 	/* and lastly the circuit itself */
@@ -251,7 +241,7 @@ void isis_circuit_configure(struct isis_circuit *circuit,
 	/*
 	 * Add the circuit into area
 	 */
-	listnode_add(area->circuit_list, circuit);
+	isis_circuit_list_add_tail(&area->circuit_list, circuit);
 
 	circuit->idx = flags_get_index(&area->flags);
 
@@ -274,7 +264,7 @@ void isis_circuit_deconfigure(struct isis_circuit *circuit,
 
 	/* Remove circuit from area */
 	assert(circuit->area == area);
-	listnode_delete(area->circuit_list, circuit);
+	isis_circuit_list_del(&area->circuit_list, circuit);
 	circuit->area = NULL;
 	circuit->isis = NULL;
 
@@ -299,8 +289,7 @@ void isis_circuit_add_addr(struct isis_circuit *circuit,
 	if (connected->address->family == AF_INET) {
 		uint32_t addr = connected->address->u.prefix4.s_addr;
 		addr = ntohl(addr);
-		if (IPV4_NET0(addr) || IPV4_NET127(addr) || IN_CLASSD(addr)
-		    || IPV4_LINKLOCAL(addr))
+		if (IPV4_NET0(addr) || IPV4_NET127(addr) || IN_CLASSD(addr))
 			return;
 
 		for (ALL_LIST_ELEMENTS_RO(circuit->ip_addrs, node, ipv4))
@@ -313,9 +302,9 @@ void isis_circuit_add_addr(struct isis_circuit *circuit,
 		ipv4->prefix = connected->address->u.prefix4;
 		listnode_add(circuit->ip_addrs, ipv4);
 
-		/* Update Local IP address parameter if MPLS TE is enable */
-		if (circuit->ext && circuit->area
-		    && IS_MPLS_TE(circuit->area->mta)) {
+		/* Update local IP address parameter if MPLS TE or SRv6 is enabled. */
+		if (circuit->ext && circuit->area &&
+		    (IS_MPLS_TE(circuit->area->mta) || IS_SRV6_ENABLED(circuit->area))) {
 			circuit->ext->local_addr.s_addr = ipv4->prefix.s_addr;
 			SET_SUBTLV(circuit->ext, EXT_LOCAL_ADDR);
 		}
@@ -352,9 +341,9 @@ void isis_circuit_add_addr(struct isis_circuit *circuit,
 			listnode_add(circuit->ipv6_link, ipv6);
 		else {
 			listnode_add(circuit->ipv6_non_link, ipv6);
-			/* Update Local IPv6 address param. if MPLS TE is on */
-			if (circuit->ext && circuit->area
-			    && IS_MPLS_TE(circuit->area->mta)) {
+			/* Update local IPv6 address parameter if MPLS TE or SRv6 is enabled. */
+			if (circuit->ext && circuit->area &&
+			    (IS_MPLS_TE(circuit->area->mta) || IS_SRV6_ENABLED(circuit->area))) {
 				IPV6_ADDR_COPY(&circuit->ext->local_addr6,
 					       &ipv6->prefix);
 				SET_SUBTLV(circuit->ext, EXT_LOCAL_ADDR6);
@@ -502,19 +491,19 @@ static uint8_t isis_circuit_id_gen(struct isis *isis, struct interface *ifp)
 
 void isis_circuit_if_add(struct isis_circuit *circuit, struct interface *ifp)
 {
-	struct listnode *node, *nnode;
 	struct connected *conn;
 
-	if (if_is_broadcast(ifp)) {
+	if (if_is_loopback(ifp) || (isis_option_check(ISIS_OPT_DUMMY_AS_LOOPBACK) &&
+				    CHECK_FLAG(ifp->status, ZEBRA_INTERFACE_DUMMY))) {
+		circuit->circ_type = CIRCUIT_T_LOOPBACK;
+		circuit->is_passive = 1;
+	} else if (if_is_broadcast(ifp)) {
 		if (fabricd || circuit->circ_type_config == CIRCUIT_T_P2P)
 			circuit->circ_type = CIRCUIT_T_P2P;
 		else
 			circuit->circ_type = CIRCUIT_T_BROADCAST;
 	} else if (if_is_pointopoint(ifp)) {
 		circuit->circ_type = CIRCUIT_T_P2P;
-	} else if (if_is_loopback(ifp)) {
-		circuit->circ_type = CIRCUIT_T_LOOPBACK;
-		circuit->is_passive = 1;
 	} else {
 		/* It's normal in case of loopback etc. */
 		if (IS_DEBUG_EVENTS)
@@ -522,20 +511,29 @@ void isis_circuit_if_add(struct isis_circuit *circuit, struct interface *ifp)
 		circuit->circ_type = CIRCUIT_T_UNKNOWN;
 	}
 
-	for (ALL_LIST_ELEMENTS(ifp->connected, node, nnode, conn))
+	frr_each (if_connected, ifp->connected, conn) {
+		/* RFC 9717: unnumbered interface — skip IP address collection
+		 * but allow IS-IS to operate using System ID only */
+		if (CHECK_FLAG(conn->flags, ZEBRA_IFA_UNNUMBERED)) {
+			circuit->is_unnumbered = true;
+			continue;
+		}
 		isis_circuit_add_addr(circuit, conn);
+	}
 
+	/* Unnumbered: ensure ip_router is set so IS-IS operates */
+	if (circuit->is_unnumbered)
+		isis_circuit_af_set(circuit, true, true);
 }
 
 void isis_circuit_if_del(struct isis_circuit *circuit, struct interface *ifp)
 {
-	struct listnode *node, *nnode;
 	struct connected *conn;
 
 	assert(circuit->interface == ifp);
 
 	/* destroy addresses */
-	for (ALL_LIST_ELEMENTS(ifp->connected, node, nnode, conn))
+	frr_each_safe (if_connected, ifp->connected, conn)
 		isis_circuit_del_addr(circuit, conn);
 
 	circuit->circ_type = CIRCUIT_T_UNKNOWN;
@@ -598,6 +596,32 @@ size_t isis_circuit_pdu_size(struct isis_circuit *circuit)
 	return ISO_MTU(circuit);
 }
 
+static bool isis_circuit_lfa_enabled(struct isis_circuit *circuit, int level)
+{
+	return (circuit->lfa_protection[level - 1] ||
+		circuit->rlfa_protection[level - 1] ||
+		circuit->tilfa_protection[level - 1]);
+}
+
+void isis_circuit_switchover_routes(struct isis_circuit *circuit, int family,
+				    union g_addr *nexthop_ip, ifindex_t ifindex)
+{
+	char is_type;
+
+	if (!circuit->area)
+		return;
+
+	is_type = circuit->area->is_type;
+	if ((is_type == IS_LEVEL_1 || is_type == IS_LEVEL_1_AND_2) &&
+	    isis_circuit_lfa_enabled(circuit, IS_LEVEL_1))
+		isis_area_switchover_routes(circuit->area, family, nexthop_ip,
+					    ifindex, IS_LEVEL_1);
+	if ((is_type == IS_LEVEL_2 || is_type == IS_LEVEL_1_AND_2) &&
+	    isis_circuit_lfa_enabled(circuit, IS_LEVEL_2))
+		isis_area_switchover_routes(circuit->area, family, nexthop_ip,
+					    ifindex, IS_LEVEL_2);
+}
+
 void isis_circuit_stream(struct isis_circuit *circuit, struct stream **stream)
 {
 	size_t stream_size = isis_circuit_pdu_size(circuit);
@@ -614,12 +638,12 @@ void isis_circuit_stream(struct isis_circuit *circuit, struct stream **stream)
 void isis_circuit_prepare(struct isis_circuit *circuit)
 {
 #if ISIS_METHOD != ISIS_METHOD_DLPI
-	thread_add_read(master, isis_receive, circuit, circuit->fd,
-			&circuit->t_read);
+	event_add_read(master, isis_receive, circuit, circuit->fd,
+		       &circuit->t_read);
 #else
-	thread_add_timer_msec(master, isis_receive, circuit,
-			      listcount(circuit->area->circuit_list) * 100,
-			      &circuit->t_read);
+	event_add_timer_msec(master, isis_receive, circuit,
+			     isis_circuit_list_count(&circuit->area->circuit_list) * 100,
+			     &circuit->t_read);
 #endif
 }
 
@@ -683,10 +707,9 @@ int isis_circuit_up(struct isis_circuit *circuit)
 		}
 #ifdef EXTREME_DEGUG
 		if (IS_DEBUG_EVENTS)
-			zlog_debug("%s: if_id %d, isomtu %d snpa %s", __func__,
-				   circuit->interface->ifindex,
-				   ISO_MTU(circuit),
-				   snpa_print(circuit->u.bc.snpa));
+			zlog_debug("%s: if_id %d, isomtu %d snpa %pSY",
+				   __func__, circuit->interface->ifindex,
+				   ISO_MTU(circuit), circuit->u.bc.snpa);
 #endif /* EXTREME_DEBUG */
 
 		circuit->u.bc.adjdb[0] = list_new();
@@ -696,7 +719,7 @@ int isis_circuit_up(struct isis_circuit *circuit)
 		 * ISO 10589 - 8.4.1 Enabling of broadcast circuits
 		 */
 
-		/* initilizing the hello sending threads
+		/* initializing the hello sending threads
 		 * for a broadcast IF
 		 */
 
@@ -709,10 +732,10 @@ int isis_circuit_up(struct isis_circuit *circuit)
 			send_hello_sched(circuit, level, TRIGGERED_IIH_DELAY);
 			circuit->u.bc.lan_neighs[level - 1] = list_new();
 
-			thread_add_timer(master, isis_run_dr,
-					 &circuit->level_arg[level - 1],
-					 2 * circuit->hello_interval[level - 1],
-					 &circuit->u.bc.t_run_dr[level - 1]);
+			event_add_timer(master, isis_run_dr,
+					&circuit->level_arg[level - 1],
+					2 * circuit->hello_interval[level - 1],
+					&circuit->u.bc.t_run_dr[level - 1]);
 		}
 
 		/* 8.4.1 b) FIXME: solicit ES - 8.4.6 */
@@ -727,13 +750,13 @@ int isis_circuit_up(struct isis_circuit *circuit)
 
 	/* initializing PSNP timers */
 	if (circuit->is_type & IS_LEVEL_1)
-		thread_add_timer(
+		event_add_timer(
 			master, send_l1_psnp, circuit,
 			isis_jitter(circuit->psnp_interval[0], PSNP_JITTER),
 			&circuit->t_send_psnp[0]);
 
 	if (circuit->is_type & IS_LEVEL_2)
-		thread_add_timer(
+		event_add_timer(
 			master, send_l2_psnp, circuit,
 			isis_jitter(circuit->psnp_interval[1], PSNP_JITTER),
 			&circuit->t_send_psnp[1]);
@@ -831,31 +854,31 @@ void isis_circuit_down(struct isis_circuit *circuit)
 		if (circuit->u.bc.adjdb[0]) {
 			circuit->u.bc.adjdb[0]->del = isis_delete_adj;
 			list_delete(&circuit->u.bc.adjdb[0]);
-			circuit->u.bc.adjdb[0] = NULL;
 		}
 		if (circuit->u.bc.adjdb[1]) {
 			circuit->u.bc.adjdb[1]->del = isis_delete_adj;
 			list_delete(&circuit->u.bc.adjdb[1]);
-			circuit->u.bc.adjdb[1] = NULL;
 		}
 		if (circuit->u.bc.is_dr[0]) {
 			isis_dr_resign(circuit, 1);
 			circuit->u.bc.is_dr[0] = 0;
 		}
+		circuit->u.bc.run_dr_elect[0] = 0;
 		memset(circuit->u.bc.l1_desig_is, 0, ISIS_SYS_ID_LEN + 1);
 		if (circuit->u.bc.is_dr[1]) {
 			isis_dr_resign(circuit, 2);
 			circuit->u.bc.is_dr[1] = 0;
 		}
+		circuit->u.bc.run_dr_elect[1] = 0;
 		memset(circuit->u.bc.l2_desig_is, 0, ISIS_SYS_ID_LEN + 1);
 		memset(circuit->u.bc.snpa, 0, ETH_ALEN);
 
-		THREAD_OFF(circuit->u.bc.t_send_lan_hello[0]);
-		THREAD_OFF(circuit->u.bc.t_send_lan_hello[1]);
-		THREAD_OFF(circuit->u.bc.t_run_dr[0]);
-		THREAD_OFF(circuit->u.bc.t_run_dr[1]);
-		THREAD_OFF(circuit->u.bc.t_refresh_pseudo_lsp[0]);
-		THREAD_OFF(circuit->u.bc.t_refresh_pseudo_lsp[1]);
+		event_cancel(&circuit->u.bc.t_send_lan_hello[0]);
+		event_cancel(&circuit->u.bc.t_send_lan_hello[1]);
+		event_cancel(&circuit->u.bc.t_run_dr[0]);
+		event_cancel(&circuit->u.bc.t_run_dr[1]);
+		event_cancel(&circuit->u.bc.t_refresh_pseudo_lsp[0]);
+		event_cancel(&circuit->u.bc.t_refresh_pseudo_lsp[1]);
 		circuit->lsp_regenerate_pending[0] = 0;
 		circuit->lsp_regenerate_pending[1] = 0;
 
@@ -865,7 +888,7 @@ void isis_circuit_down(struct isis_circuit *circuit)
 	} else if (circuit->circ_type == CIRCUIT_T_P2P) {
 		isis_delete_adj(circuit->u.p2p.neighbor);
 		circuit->u.p2p.neighbor = NULL;
-		THREAD_OFF(circuit->u.p2p.t_send_p2p_hello);
+		event_cancel(&circuit->u.p2p.t_send_p2p_hello);
 	}
 
 	/*
@@ -878,18 +901,18 @@ void isis_circuit_down(struct isis_circuit *circuit)
 	circuit->snmp_adj_idx_gen = 0;
 
 	/* Cancel all active threads */
-	THREAD_OFF(circuit->t_send_csnp[0]);
-	THREAD_OFF(circuit->t_send_csnp[1]);
-	THREAD_OFF(circuit->t_send_psnp[0]);
-	THREAD_OFF(circuit->t_send_psnp[1]);
-	THREAD_OFF(circuit->t_read);
+	event_cancel(&circuit->t_send_csnp[0]);
+	event_cancel(&circuit->t_send_csnp[1]);
+	event_cancel(&circuit->t_send_psnp[0]);
+	event_cancel(&circuit->t_send_psnp[1]);
+	event_cancel(&circuit->t_read);
 
 	if (circuit->tx_queue) {
 		isis_tx_queue_free(circuit->tx_queue);
 		circuit->tx_queue = NULL;
 	}
 
-	/* send one gratuitous hello to spead up convergence */
+	/* send one gratuitous hello to speed up convergence */
 	if (circuit->state == C_STATE_UP) {
 		if (circuit->is_type & IS_LEVEL_1)
 			send_hello(circuit, IS_LEVEL_1);
@@ -916,7 +939,7 @@ void isis_circuit_down(struct isis_circuit *circuit)
 		circuit->snd_stream = NULL;
 	}
 
-	thread_cancel_event(master, circuit);
+	event_cancel_event(master, circuit);
 
 	return;
 }
@@ -983,8 +1006,8 @@ void isis_circuit_print_json(struct isis_circuit *circuit,
 		json_object_string_add(iface_json, "level",
 				       circuit_t2string(circuit->is_type));
 		if (circuit->circ_type == CIRCUIT_T_BROADCAST)
-			json_object_string_add(iface_json, "snpa",
-					       snpa_print(circuit->u.bc.snpa));
+			json_object_string_addf(iface_json, "snpa", "%pSY",
+						circuit->u.bc.snpa);
 
 
 		levels_json = json_object_new_array();
@@ -1013,7 +1036,8 @@ void isis_circuit_print_json(struct isis_circuit *circuit,
 						    circuit->hello_multiplier[level - 1]);
 				json_object_string_add(
 					hold_json, "pad",
-					(circuit->pad_hellos ? "yes" : "no"));
+					isis_hello_padding2string(
+						circuit->pad_hellos));
 				json_object_int_add(level_json, "cnsp-interval",
 						    circuit->csnp_interval[level - 1]);
 				json_object_int_add(level_json, "psnp-interval",
@@ -1104,8 +1128,7 @@ void isis_circuit_print_vty(struct isis_circuit *circuit, struct vty *vty,
 			circuit_type2string(circuit->circ_type));
 		vty_out(vty, ", Level: %s", circuit_t2string(circuit->is_type));
 		if (circuit->circ_type == CIRCUIT_T_BROADCAST)
-			vty_out(vty, ", SNPA: %-10s",
-				snpa_print(circuit->u.bc.snpa));
+			vty_out(vty, ", SNPA: %-10pSY", circuit->u.bc.snpa);
 		vty_out(vty, "\n");
 		if (circuit->is_type & IS_LEVEL_1) {
 			vty_out(vty, "    Level-1 Information:\n");
@@ -1119,11 +1142,11 @@ void isis_circuit_print_vty(struct isis_circuit *circuit, struct vty *vty,
 				vty_out(vty, ", Active neighbors: %u\n",
 					circuit->upadjcount[0]);
 				vty_out(vty,
-					"      Hello interval: %u, Holddown count: %u %s\n",
+					"      Hello interval: %u, Holddown count: %u, Padding: %s\n",
 					circuit->hello_interval[0],
 					circuit->hello_multiplier[0],
-					(circuit->pad_hellos ? "(pad)"
-							     : "(no-pad)"));
+					isis_hello_padding2string(
+						circuit->pad_hellos));
 				vty_out(vty,
 					"      CNSP interval: %u, PSNP interval: %u\n",
 					circuit->csnp_interval[0],
@@ -1151,11 +1174,11 @@ void isis_circuit_print_vty(struct isis_circuit *circuit, struct vty *vty,
 				vty_out(vty, ", Active neighbors: %u\n",
 					circuit->upadjcount[1]);
 				vty_out(vty,
-					"      Hello interval: %u, Holddown count: %u %s\n",
+					"      Hello interval: %u, Holddown count: %u, Padding: %s\n",
 					circuit->hello_interval[1],
 					circuit->hello_multiplier[1],
-					(circuit->pad_hellos ? "(pad)"
-							     : "(no-pad)"));
+					isis_hello_padding2string(
+						circuit->pad_hellos));
 				vty_out(vty,
 					"      CNSP interval: %u, PSNP interval: %u\n",
 					circuit->csnp_interval[1],
@@ -1301,11 +1324,20 @@ static int isis_interface_config_write(struct vty *vty)
 				}
 			}
 
-			/* ISIS - Hello padding - Defaults to true so only
-			 * display if false */
-			if (circuit->pad_hellos == 0) {
+			/* ISIS - Hello padding - Defaults to always so only
+			 * display if not always */
+			switch (circuit->pad_hellos) {
+			case ISIS_HELLO_PADDING_DISABLED:
 				vty_out(vty, " no " PROTO_NAME " hello padding\n");
 				write++;
+				break;
+			case ISIS_HELLO_PADDING_DURING_ADJACENCY_FORMATION:
+				vty_out(vty, PROTO_NAME
+					" hello padding during-adjacency-formation\n");
+				write++;
+				break;
+			case ISIS_HELLO_PADDING_ALWAYS:
+				break;
 			}
 
 			if (circuit->disable_threeway_adj) {
@@ -1481,6 +1513,10 @@ ferr_r isis_circuit_metric_set(struct isis_circuit *circuit, int level,
 		return ferr_cfg_invalid("metric %d too large for narrow metric",
 					metric);
 
+	/* Don't modify metric if advertise high metrics is configured */
+	if (circuit->area && circuit->area->advertise_high_metrics)
+		return ferr_ok();
+
 	/* inform ldp-sync of metric change
          *   if ldp-sync is running need to save metric
          *   and restore new values after ldp-sync completion.
@@ -1597,17 +1633,29 @@ static int isis_ifp_up(struct interface *ifp)
 {
 	struct isis_circuit *circuit = ifp->info;
 
-	if (circuit)
+	if (circuit) {
+		UNSET_FLAG(circuit->flags, ISIS_CIRCUIT_IF_DOWN_FROM_Z);
 		isis_csm_state_change(IF_UP_FROM_Z, circuit, ifp);
+	}
+
+	/* Notify SRv6 that the interface went up */
+	isis_srv6_ifp_up_notify(ifp);
 
 	return 0;
 }
 
 static int isis_ifp_down(struct interface *ifp)
 {
+	afi_t afi;
 	struct isis_circuit *circuit = ifp->info;
 
-	if (circuit) {
+	if (circuit &&
+	    !CHECK_FLAG(circuit->flags, ISIS_CIRCUIT_IF_DOWN_FROM_Z)) {
+		SET_FLAG(circuit->flags, ISIS_CIRCUIT_IF_DOWN_FROM_Z);
+		for (afi = AFI_IP; afi <= AFI_IP6; afi++)
+			isis_circuit_switchover_routes(
+				circuit, afi == AFI_IP ? AF_INET : AF_INET6,
+				NULL, ifp->ifindex);
 		isis_csm_state_change(IF_DOWN_FROM_Z, circuit, ifp);
 
 		SET_FLAG(circuit->flags, ISIS_CIRCUIT_FLAPPED_AFTER_SPF);
@@ -1626,6 +1674,66 @@ static int isis_ifp_destroy(struct interface *ifp)
 	return 0;
 }
 
+/* Reset IS hello timer after interval change */
+void isis_reset_hello_timer(struct isis_circuit *circuit)
+{
+	/* First send an immediate hello to prevent adjacency loss 
+     * during longer hello interval transitions 
+     */
+	if (circuit->circ_type == CIRCUIT_T_BROADCAST) {
+		/* For broadcast circuits - need to handle both levels */
+		if (circuit->is_type & IS_LEVEL_1) {
+			/* send hello immediately */
+			send_hello(circuit, IS_LEVEL_1);
+
+			/* reset level-1 hello timer */
+			event_cancel(&circuit->u.bc.t_send_lan_hello[0]);
+			if (circuit->area && (circuit->area->is_type & IS_LEVEL_1))
+				send_hello_sched(circuit, IS_LEVEL_1,
+						 isis_jitter(circuit->hello_interval[0],
+							     IIH_JITTER));
+		}
+
+		if (circuit->is_type & IS_LEVEL_2) {
+			/* send hello immediately */
+			send_hello(circuit, IS_LEVEL_2);
+
+			/* reset level-2 hello timer */
+			event_cancel(&circuit->u.bc.t_send_lan_hello[1]);
+			if (circuit->area && (circuit->area->is_type & IS_LEVEL_2))
+				send_hello_sched(circuit, IS_LEVEL_2,
+						 isis_jitter(circuit->hello_interval[1],
+							     IIH_JITTER));
+		}
+	} else if (circuit->circ_type == CIRCUIT_T_P2P) {
+		/* For point-to-point circuits */
+		send_hello(circuit, IS_LEVEL_1);
+
+		/* reset hello timer */
+		event_cancel(&circuit->u.p2p.t_send_p2p_hello);
+		send_hello_sched(circuit, 0, isis_jitter(circuit->hello_interval[0], IIH_JITTER));
+	}
+}
+
+/* Phase 9: set overload bit on all IS-IS areas (for node schedule) */
+static int isis_area_overload_bit_set_all(bool overload)
+{
+	struct isis *isis;
+	struct isis_area *area;
+	int count = 0;
+
+	frr_each (isis_instance_list, &im->isis, isis) {
+		frr_each (isis_area_list, &isis->area_list, area) {
+			isis_area_overload_bit_set(area, overload);
+			count++;
+		}
+	}
+	return count;
+}
+
+/* Phase 6: forward declaration for schedule action callback */
+static void isis_schedule_action_cb(struct schedule_entry *entry);
+
 void isis_circuit_init(void)
 {
 	/* Initialize Zebra interface data structure */
@@ -1638,6 +1746,123 @@ void isis_circuit_init(void)
 #else
 	if_cmd_init_default();
 #endif
-	if_zapi_callbacks(isis_ifp_create, isis_ifp_up,
-			  isis_ifp_down, isis_ifp_destroy);
+	hook_register_prio(if_real, 0, isis_ifp_create);
+	hook_register_prio(if_up, 0, isis_ifp_up);
+	hook_register_prio(if_down, 0, isis_ifp_down);
+	hook_register_prio(if_unreal, 0, isis_ifp_destroy);
+
+	/* Phase 6: register satellite schedule action callback */
+	schedule_action_hook = isis_schedule_action_cb;
+}
+
+/* ───────────────────────────────────────────────────────────
+ *  Phase 6: Satellite Link Schedule — metric helpers
+ *
+ *  Called by the satellite_schedule engine via callback to
+ *  dynamically adjust circuit metrics before/after ISL changes.
+ * ─────────────────────────────────────────────────────────── */
+
+static void isis_schedule_action_cb(struct schedule_entry *entry)
+{
+	switch (entry->action) {
+	case SCHEDULE_ACTION_METRIC_HIGH:
+		isis_circuit_sched_metric_set(entry->interface,
+					      entry->metric_value);
+		break;
+	case SCHEDULE_ACTION_METRIC_RESTORE:
+		isis_circuit_sched_metric_restore(entry->interface);
+		break;
+	case SCHEDULE_ACTION_LINK_DOWN:
+	case SCHEDULE_ACTION_LINK_UP:
+		/* Link state changes are handled by the simulation platform.
+		 * FRR will react to the Netlink events automatically. */
+		zlog_info("Satellite-Schedule: %s on '%s' — awaiting platform execution",
+			  entry->action == SCHEDULE_ACTION_LINK_DOWN
+				  ? "LINK_DOWN"
+				  : "LINK_UP",
+			  entry->interface);
+		break;
+	case SCHEDULE_ACTION_NODE_OVERLOAD:
+		/* RFC 9717: set overload bit to drain traffic before node offline */
+		if (isis_area_overload_bit_set_all(true))
+			zlog_info("Satellite-Schedule: overload bit set on all areas");
+		break;
+	case SCHEDULE_ACTION_NODE_NORMAL:
+		/* RFC 9717: clear overload bit when node comes back */
+		if (isis_area_overload_bit_set_all(false))
+			zlog_info("Satellite-Schedule: overload bit cleared on all areas");
+		break;
+	case SCHEDULE_ACTION_NONE:
+		break;
+	default:
+		break;
+	}
+}
+
+int isis_circuit_sched_metric_set(const char *ifname, uint32_t metric)
+{
+	struct interface *ifp;
+	struct isis_circuit *circuit;
+
+	ifp = if_lookup_by_name(ifname, VRF_DEFAULT);
+	if (!ifp) {
+		zlog_warn("Satellite-Schedule: interface '%s' not found", ifname);
+		return -1;
+	}
+
+	circuit = circuit_scan_by_ifp(ifp);
+	if (!circuit) {
+		zlog_warn("Satellite-Schedule: no IS-IS circuit on '%s'", ifname);
+		return -1;
+	}
+
+	/* Save original metric values for later restore */
+	circuit->saved_te_metric[ISIS_LEVEL1 - 1] = circuit->te_metric[ISIS_LEVEL1 - 1];
+	circuit->saved_te_metric[ISIS_LEVEL2 - 1] = circuit->te_metric[ISIS_LEVEL2 - 1];
+
+	/* Set new metric on all active levels */
+	circuit->te_metric[ISIS_LEVEL1 - 1] = metric;
+	circuit->te_metric[ISIS_LEVEL2 - 1] = metric;
+
+	/* Trigger LSP regeneration to advertise the new metric */
+	if (circuit->area)
+		lsp_regenerate_schedule(circuit->area, IS_LEVEL_1 | IS_LEVEL_2, 0);
+
+	zlog_info("Satellite-Schedule: metric on '%s' set to %u (saved: L1=%u L2=%u)",
+		  ifname, metric,
+		  circuit->saved_te_metric[0], circuit->saved_te_metric[1]);
+
+	return 0;
+}
+
+int isis_circuit_sched_metric_restore(const char *ifname)
+{
+	struct interface *ifp;
+	struct isis_circuit *circuit;
+
+	ifp = if_lookup_by_name(ifname, VRF_DEFAULT);
+	if (!ifp) {
+		zlog_warn("Satellite-Schedule: interface '%s' not found", ifname);
+		return -1;
+	}
+
+	circuit = circuit_scan_by_ifp(ifp);
+	if (!circuit) {
+		zlog_warn("Satellite-Schedule: no IS-IS circuit on '%s'", ifname);
+		return -1;
+	}
+
+	/* Restore saved metric values */
+	circuit->te_metric[ISIS_LEVEL1 - 1] = circuit->saved_te_metric[ISIS_LEVEL1 - 1];
+	circuit->te_metric[ISIS_LEVEL2 - 1] = circuit->saved_te_metric[ISIS_LEVEL2 - 1];
+
+	/* Trigger LSP regeneration to advertise the restored metric */
+	if (circuit->area)
+		lsp_regenerate_schedule(circuit->area, IS_LEVEL_1 | IS_LEVEL_2, 0);
+
+	zlog_info("Satellite-Schedule: metric on '%s' restored to L1=%u L2=%u",
+		  ifname,
+		  circuit->te_metric[0], circuit->te_metric[1]);
+
+	return 0;
 }

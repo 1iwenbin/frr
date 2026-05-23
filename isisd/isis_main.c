@@ -57,6 +57,10 @@
 #include "isisd/isis_lsp.h"
 #include "isisd/isis_mt.h"
 #include "isisd/fabricd.h"
+#include "satellite_schedule.h"
+
+/* Phase 6: schedule CLI — installed from isisd/isis_schedule.c */
+extern void isis_schedule_cli_init(void);
 #include "isisd/isis_nb.h"
 #include "isisd/isis_ldp_sync.h"
 
@@ -250,6 +254,8 @@ int main(int argc, char **argv, char **envp)
 	prefix_list_delete_hook(isis_prefix_list_update);
 	isis_init();
 	isis_circuit_init();
+	satellite_schedule_init(master);
+	isis_schedule_cli_init();
 #ifdef FABRICD
 	isis_vty_daemon_init();
 #endif /* FABRICD */

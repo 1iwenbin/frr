@@ -7,8 +7,13 @@ lib_libfrr_la_LDFLAGS = $(LIB_LDFLAGS) -version-info 0:0:0 -Xlinker -e_libfrr_ve
 lib_libfrr_la_LIBADD = $(LIBCAP) $(UNWIND_LIBS) $(LIBYANG_LIBS) $(LUA_LIB) $(UST_LIBS) $(LIBCRYPT) $(LIBDL) $(LIBM)
 
 lib_libfrr_la_SOURCES = \
+	lib/admin_group.c \
+	lib/affinitymap.c \
+	lib/affinitymap_cli.c \
+	lib/affinitymap_northbound.c \
 	lib/agg_table.c \
 	lib/atomlist.c \
+	lib/asn.c \
 	lib/base64.c \
 	lib/bfd.c \
 	lib/buffer.c \
@@ -20,6 +25,7 @@ lib_libfrr_la_SOURCES = \
 	lib/command_parse.y \
 	lib/cspf.c \
 	lib/csv.c \
+	lib/darr.c \
 	lib/debug.c \
 	lib/defaults.c \
 	lib/distribute.c \
@@ -28,49 +34,60 @@ lib_libfrr_la_SOURCES = \
 	lib/filter.c \
 	lib/filter_cli.c \
 	lib/filter_nb.c \
+	lib/flex_algo.c \
 	lib/frrcu.c \
 	lib/frrlua.c \
 	lib/frrscript.c \
 	lib/frr_pthread.c \
 	lib/frrstr.c \
-	lib/getopt.c \
-	lib/getopt1.c \
 	lib/grammar_sandbox.c \
 	lib/graph.c \
 	lib/hash.c \
+	lib/host_cli.c \
+	lib/host_nb.c \
 	lib/hook.c \
 	lib/id_alloc.c \
 	lib/if.c \
 	lib/if_rmap.c \
-	lib/imsg-buffer.c \
-	lib/imsg.c \
+	lib/iso.c \
 	lib/jhash.c \
 	lib/json.c \
 	lib/keychain.c \
+	lib/keychain_cli.c \
+	lib/keychain_nb.c \
 	lib/ldp_sync.c \
 	lib/lib_errors.c \
 	lib/lib_vty.c \
+	lib/libagentx.c \
 	lib/libfrr.c \
 	lib/libfrr_trace.c \
 	lib/linklist.c \
 	lib/link_state.c \
 	lib/log.c \
+	lib/log_cli.c \
 	lib/log_filter.c \
+	lib/log_nb.c \
 	lib/log_vty.c \
 	lib/md5.c \
 	lib/memory.c \
+	lib/mgmt_be_client.c \
+	lib/mgmt_fe_client.c \
+	lib/mgmt_msg.c \
+	lib/mgmt_msg_native.c \
 	lib/mlag.c \
 	lib/module.c \
 	lib/mpls.c \
 	lib/srv6.c \
+	lib/netlink_parser.c \
 	lib/network.c \
 	lib/nexthop.c \
-	lib/netns_linux.c \
-	lib/netns_other.c \
+	lib/netns.c \
 	lib/nexthop_group.c \
 	lib/northbound.c \
 	lib/northbound_cli.c \
 	lib/northbound_db.c \
+	lib/northbound_notif.c \
+	lib/northbound_oper.c \
 	lib/ntop.c \
 	lib/openbsd-tree.c \
 	lib/pid_output.c \
@@ -92,6 +109,9 @@ lib_libfrr_la_SOURCES = \
 	lib/sockopt.c \
 	lib/sockunion.c \
 	lib/spf_backoff.c \
+	lib/satellite_schedule.c \
+	lib/satellite_schedule_cli.c \
+	lib/segment_routing.c \
 	lib/srcdest_table.c \
 	lib/stream.c \
 	lib/strformat.c \
@@ -100,7 +120,7 @@ lib_libfrr_la_SOURCES = \
 	lib/systemd.c \
 	lib/table.c \
 	lib/termtable.c \
-	lib/thread.c \
+	lib/event.c \
 	lib/typerb.c \
 	lib/typesafe.c \
 	lib/vector.c \
@@ -117,48 +137,39 @@ lib_libfrr_la_SOURCES = \
 	lib/zlog_5424.c \
 	lib/zlog_5424_cli.c \
 	lib/zlog_live.c \
+	lib/zlog_recirculate.c \
 	lib/zlog_targets.c \
 	lib/printf/printf-pos.c \
 	lib/printf/vfprintf.c \
 	lib/printf/glue.c \
 	lib/routing_nb.c \
 	lib/routing_nb_config.c \
+	lib/tc.c \
 	# end
 
 nodist_lib_libfrr_la_SOURCES = \
+	yang/frr-affinity-map.yang.c \
+	yang/frr-backend.yang.c \
 	yang/frr-filter.yang.c \
+	yang/frr-host.yang.c \
+	yang/frr-if-rmap.yang.c \
 	yang/frr-interface.yang.c \
+	yang/frr-logging.yang.c \
 	yang/frr-route-map.yang.c \
 	yang/frr-route-types.yang.c \
 	yang/frr-vrf.yang.c \
 	yang/frr-routing.yang.c \
 	yang/frr-nexthop.yang.c \
+	yang/ietf/frr-deviations-ietf-key-chain.yang.c \
 	yang/ietf/ietf-routing-types.yang.c \
+	yang/ietf/ietf-syslog-types.yang.c \
+	yang/ietf/ietf-netconf-acm.yang.c \
+	yang/ietf/ietf-key-chain.yang.c \
 	yang/ietf/ietf-interfaces.yang.c \
 	yang/ietf/ietf-bgp-types.yang.c \
 	yang/frr-module-translator.yang.c \
+	yang/ietf/ietf-srv6-types.yang.c \
 	# end
-
-vtysh_scan += \
-	lib/distribute.c \
-	lib/filter.c \
-	lib/filter_cli.c \
-	lib/if.c \
-	lib/if_rmap.c \
-	lib/keychain.c \
-	lib/lib_vty.c \
-	lib/log_vty.c \
-	lib/nexthop_group.c \
-	lib/plist.c \
-	lib/routemap.c \
-	lib/routemap_cli.c \
-	lib/spf_backoff.c \
-	lib/thread.c \
-	lib/vrf.c \
-	lib/vty.c \
-	# end
-# can be loaded as DSO - always include for vtysh
-vtysh_scan += lib/agentx.c
 
 if SQLITE3
 lib_libfrr_la_LIBADD += $(SQLITE3_LIBS)
@@ -166,21 +177,34 @@ lib_libfrr_la_SOURCES += lib/db.c
 endif
 
 clippy_scan += \
+	lib/affinitymap_cli.c \
+	lib/host_cli.c \
 	lib/if.c \
 	lib/filter_cli.c \
+	lib/if_rmap.c \
+	lib/keychain_cli.c \
+	lib/log_cli.c \
 	lib/log_vty.c \
+	lib/mgmt_be_client.c \
+	lib/mgmt_fe_client.c \
 	lib/nexthop_group.c \
 	lib/northbound_cli.c \
 	lib/plist.c \
+	lib/routemap.c \
 	lib/routemap_cli.c \
-	lib/thread.c \
+	lib/satellite_schedule_cli.c \
+	lib/event.c \
 	lib/vty.c \
 	lib/zlog_5424_cli.c \
 	# end
 
-pkginclude_HEADERS += \
+nobase_pkginclude_HEADERS += \
+	lib/admin_group.h \
+	lib/affinitymap.h \
 	lib/agg_table.h \
+	lib/asn.h \
 	lib/atomlist.h \
+	lib/atomptr.h \
 	lib/base64.h \
 	lib/bfd.h \
 	lib/bitfield.h \
@@ -193,35 +217,40 @@ pkginclude_HEADERS += \
 	lib/compiler.h \
 	lib/cspf.h \
 	lib/csv.h \
+	lib/darr.h \
 	lib/db.h \
 	lib/debug.h \
 	lib/defaults.h \
 	lib/distribute.h \
 	lib/ferr.h \
 	lib/filter.h \
+	lib/flex_algo.h \
 	lib/freebsd-queue.h \
+	lib/frrdistance.h \
 	lib/frrlua.h \
 	lib/frrscript.h \
 	lib/frr_pthread.h \
 	lib/frratomic.h \
 	lib/frrcu.h \
+	lib/frrsendmmsg.h \
 	lib/frrstr.h \
-	lib/getopt.h \
 	lib/graph.h \
 	lib/hash.h \
 	lib/hook.h \
+	lib/host_nb.h \
 	lib/iana_afi.h \
 	lib/id_alloc.h \
 	lib/if.h \
 	lib/if_rmap.h \
-	lib/imsg.h \
 	lib/ipaddr.h \
+	lib/iso.h \
 	lib/jhash.h \
 	lib/json.h \
 	lib/keychain.h \
 	lib/ldp_sync.h \
 	lib/lib_errors.h \
 	lib/lib_vty.h \
+	lib/libagentx.h \
 	lib/libfrr.h \
 	lib/libfrr_trace.h \
 	lib/libospf.h \
@@ -231,10 +260,16 @@ pkginclude_HEADERS += \
 	lib/log_vty.h \
 	lib/md5.h \
 	lib/memory.h \
+	lib/mgmt_be_client.h \
+	lib/mgmt_defines.h \
+	lib/mgmt_fe_client.h \
+	lib/mgmt_msg.h \
+	lib/mgmt_msg_native.h \
 	lib/module.h \
 	lib/monotime.h \
 	lib/mpls.h \
 	lib/srv6.h \
+	lib/netlink_parser.h \
 	lib/network.h \
 	lib/nexthop.h \
 	lib/nexthop_group.h \
@@ -266,13 +301,17 @@ pkginclude_HEADERS += \
 	lib/sockopt.h \
 	lib/sockunion.h \
 	lib/spf_backoff.h \
+	lib/satellite_schedule.h \
+	lib/sockunion.h \
+	lib/spf_backoff.h \
+	lib/segment_routing.h \
 	lib/srcdest_table.h \
 	lib/srte.h \
 	lib/stream.h \
 	lib/systemd.h \
 	lib/table.h \
 	lib/termtable.h \
-	lib/thread.h \
+	lib/frrevent.h \
 	lib/trace.h \
 	lib/typerb.h \
 	lib/typesafe.h \
@@ -293,21 +332,24 @@ pkginclude_HEADERS += \
 	lib/zlog.h \
 	lib/zlog_5424.h \
 	lib/zlog_live.h \
+	lib/zlog_recirculate.h \
 	lib/zlog_targets.h \
 	lib/pbr.h \
+	lib/tc.h \
 	lib/routing_nb.h \
 	\
 	lib/assert/assert.h \
 	# end
 
 
-nodist_pkginclude_HEADERS += \
+nobase_nodist_pkginclude_HEADERS += \
 	lib/route_types.h \
 	lib/version.h \
 	# end
 
 noinst_HEADERS += \
 	lib/clippy.h \
+	lib/frregex_real.h \
 	lib/plist_int.h \
 	lib/printf/printfcommon.h \
 	lib/printf/printflocal.h \
@@ -345,8 +387,7 @@ lib_libfrrsnmp_la_SOURCES = \
 #
 if CARES
 lib_LTLIBRARIES += lib/libfrrcares.la
-pkginclude_HEADERS += lib/resolver.h
-vtysh_scan += lib/resolver.c
+nobase_pkginclude_HEADERS += lib/resolver.h
 endif
 
 lib_libfrrcares_la_CFLAGS = $(AM_CFLAGS) $(CARES_CFLAGS)
@@ -361,7 +402,7 @@ lib_libfrrcares_la_SOURCES = \
 #
 if ZEROMQ
 lib_LTLIBRARIES += lib/libfrrzmq.la
-pkginclude_HEADERS += lib/frr_zmq.h
+nobase_pkginclude_HEADERS += lib/frr_zmq.h
 endif
 
 lib_libfrrzmq_la_CFLAGS = $(AM_CFLAGS) $(ZEROMQ_CFLAGS)
@@ -370,18 +411,6 @@ lib_libfrrzmq_la_LIBADD = $(ZEROMQ_LIBS)
 lib_libfrrzmq_la_SOURCES = \
 	lib/frr_zmq.c \
 	#end
-
-#
-# Tail-f's ConfD support
-#
-if CONFD
-module_LTLIBRARIES += lib/confd.la
-endif
-
-lib_confd_la_CFLAGS = $(AM_CFLAGS) $(CONFD_CFLAGS)
-lib_confd_la_LDFLAGS = $(MODULE_LDFLAGS)
-lib_confd_la_LIBADD = lib/libfrr.la $(CONFD_LIBS)
-lib_confd_la_SOURCES = lib/northbound_confd.c
 
 #
 # Sysrepo support
@@ -475,14 +504,40 @@ SUFFIXES += .xref
 %.xref: % $(CLIPPY)
 	$(AM_V_XRELFO) $(CLIPPY) $(top_srcdir)/python/xrelfo.py $(WERROR) $(XRELFO_FLAGS) -o $@ $<
 
+# these run up to a total of 350k lines at the time of writing.  That's a lot
+# for the compiler to chug down - enough to warrant splitting it up so it can
+# benefit from parallel build.
+vtysh_cmd_split = \
+	vtysh/vtysh_cmd.1.c \
+	vtysh/vtysh_cmd.2.c \
+	vtysh/vtysh_cmd.3.c \
+	vtysh/vtysh_cmd.4.c \
+	vtysh/vtysh_cmd.5.c \
+	vtysh/vtysh_cmd.6.c \
+	vtysh/vtysh_cmd.7.c \
+	vtysh/vtysh_cmd.8.c \
+	# end
+
 # dependencies added in python/makefile.py
 frr.xref:
-	$(AM_V_XRELFO) $(CLIPPY) $(top_srcdir)/python/xrelfo.py -o $@ $^
+	$(AM_V_XRELFO) $(CLIPPY) $(top_srcdir)/python/xrelfo.py $(WERROR) -o $@ $^ \
+		-c vtysh/vtysh_cmd.c $(vtysh_cmd_split)
 all-am: frr.xref
 
 clean-xref:
 	-rm -rf $(xrefs) frr.xref
 clean-local: clean-xref
+
+vtysh/vtysh_cmd.c: frr.xref
+	@test -f $@ || rm -f frr.xref || true
+	@test -f $@ || $(MAKE) $(AM_MAKEFLAGS) frr.xref
+
+vtysh/vtysh_cmd.%.c: vtysh/vtysh_cmd.c
+	@test -f $@ || rm -f vtysh/vtysh_cmd.c || true
+	@test -f $@ || $(MAKE) $(AM_MAKEFLAGS) vtysh/vtysh_cmd.c
+
+nodist_vtysh_vtysh_SOURCES = vtysh/vtysh_cmd.c $(vtysh_cmd_split)
+CLEANFILES += vtysh/vtysh_cmd.c $(vtysh_cmd_split)
 
 ## automake's "ylwrap" is a great piece of GNU software... not.
 .l.c:
@@ -504,11 +559,21 @@ EXTRA_DIST += \
 BUILT_SOURCES += \
 	lib/gitversion.h \
 	lib/route_types.h \
+	lib/vtysh_daemons.h \
 	# end
 
 ## force route_types.h
 $(lib_clippy_OBJECTS): lib/route_types.h
 $(lib_libfrr_la_OBJECTS): lib/route_types.h
+
+# force lib_daemons.h
+$(lib_libfrr_la_OBJECTS): lib/vtysh_daemons.h
+
+CLEANFILES += lib/vtysh_daemons.h
+lib/vtysh_daemons.h:
+	@$(MKDIR_P) lib
+	$(PERL) $(top_srcdir)/vtysh/daemons.pl $(vtysh_daemons) > lib/vtysh_daemons.h
+
 
 AM_YFLAGS = -d -Dapi.prefix=@BISON_OPENBRACE@cmd_yy@BISON_CLOSEBRACE@ @BISON_VERBOSE@
 
@@ -582,6 +647,7 @@ rt_enabled += --enabled zebra
 endif
 
 lib/route_types.h: $(top_srcdir)/lib/route_types.txt $(top_srcdir)/lib/route_types.pl
+	@$(MKDIR_P) lib
 	$(PERL) $(top_srcdir)/lib/route_types.pl $(rt_enabled) < $(top_srcdir)/lib/route_types.txt > $@
 DISTCLEANFILES += lib/route_types.h
 
@@ -596,6 +662,7 @@ PHONY_GITVERSION=lib/gitversion.h.tmp
 .SILENT: lib/gitversion.h lib/gitversion.h.tmp
 GITH=lib/gitversion.h
 lib/gitversion.h.tmp: $(top_srcdir)/.git
+	@$(MKDIR_P) lib
 	$(PERL) $(top_srcdir)/lib/gitversion.pl $(top_srcdir) > ${GITH}.tmp
 lib/gitversion.h: lib/gitversion.h.tmp
 	{ test -f ${GITH} && diff -s -q ${GITH}.tmp ${GITH}; } || cp ${GITH}.tmp ${GITH}

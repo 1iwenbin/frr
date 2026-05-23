@@ -160,6 +160,13 @@ int isis_lsp_iterate_is_reach(struct isis_lsp *lsp, uint16_t mtid,
 	_lsp_flood((lsp), (circuit), __func__, __FILE__, __LINE__)
 void _lsp_flood(struct isis_lsp *lsp, struct isis_circuit *circuit,
 		const char *func, const char *file, int line);
+
+/* RFC 9666 Area Proxy: identify Proxy LSP by source System ID */
+bool isis_lsp_is_proxy_lsp(const struct isis_lsp *lsp);
+
+/* Build LSP PDU from pre-constructed TLVs (used by Area Proxy) */
+void lsp_build_from_tlvs(struct isis_lsp *lsp);
+
 void lsp_init(void);
 
 #endif /* ISIS_LSP */

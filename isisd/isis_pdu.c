@@ -59,6 +59,7 @@
 #include "isisd/isis_tx_queue.h"
 #include "isisd/isis_pdu_counter.h"
 #include "isisd/isis_nb.h"
+#include "isisd/isis_area_proxy.h"
 
 static int ack_lsp(struct isis_lsp_hdr *hdr, struct isis_circuit *circuit,
 		   int level)
@@ -775,25 +776,32 @@ static int process_hello(uint8_t pdu_type, struct isis_circuit *circuit,
 		goto out;
 	}
 
-	iih.v4_usable = (fabricd_ip_addrs(circuit)
-			 && iih.tlvs->ipv4_address.count);
+	/* RFC 9717: Unnumbered interfaces operate without IP addresses.
+	 * Skip the IP address usability check for unnumbered circuits. */
+	if (circuit->is_unnumbered) {
+		iih.v4_usable = true;
+		iih.v6_usable = true;
+	} else {
+		iih.v4_usable = (fabricd_ip_addrs(circuit)
+				 && iih.tlvs->ipv4_address.count);
 
-	iih.v6_usable =
-		(listcount(circuit->ipv6_link) && iih.tlvs->ipv6_address.count);
+		iih.v6_usable =
+			(listcount(circuit->ipv6_link) && iih.tlvs->ipv6_address.count);
 
-	if (!iih.v4_usable && !iih.v6_usable) {
-		if (IS_DEBUG_ADJ_PACKETS) {
-			zlog_warn(
-				"ISIS-Adj (%s): Neither IPv4 nor IPv6 considered usable. Ignoring IIH",
-				circuit->area->area_tag);
-		}
-		update_rej_adj_count(circuit);
+		if (!iih.v4_usable && !iih.v6_usable) {
+			if (IS_DEBUG_ADJ_PACKETS) {
+				zlog_warn(
+					"ISIS-Adj (%s): Neither IPv4 nor IPv6 considered usable. Ignoring IIH",
+					circuit->area->area_tag);
+			}
+			update_rej_adj_count(circuit);
 #ifndef FABRICD
-		isis_notif_reject_adjacency(
-			circuit, "Neither IPv4 not IPv6 considered usable",
-			raw_pdu, sizeof(raw_pdu));
+			isis_notif_reject_adjacency(
+				circuit, "Neither IPv4 not IPv6 considered usable",
+				raw_pdu, sizeof(raw_pdu));
 #endif /* ifndef FABRICD */
-		goto out;
+			goto out;
+		}
 	}
 
 	retval = p2p_hello ? process_p2p_hello(&iih) : process_lan_hello(&iih);
@@ -1962,18 +1970,18 @@ int send_hello(struct isis_circuit *circuit, int level)
 						     false, false);
 	}
 
-	if (circuit->ip_router) {
+	if (circuit->ip_router && !circuit->is_unnumbered) {
 		struct list *circuit_ip_addrs = fabricd_ip_addrs(circuit);
 
 		if (circuit_ip_addrs)
 			isis_tlvs_add_ipv4_addresses(tlvs, circuit_ip_addrs);
 	}
 
-	if (circuit->ipv6_router)
+	if (circuit->ipv6_router && !circuit->is_unnumbered)
 		isis_tlvs_add_ipv6_addresses(tlvs, circuit->ipv6_link);
 
 	/* RFC6119 section 4 define TLV 233 to provide Global IPv6 address */
-	if (circuit->ipv6_router)
+	if (circuit->ipv6_router && !circuit->is_unnumbered)
 		isis_tlvs_add_global_ipv6_addresses(tlvs,
 						    circuit->ipv6_non_link);
 
@@ -2182,6 +2190,38 @@ int send_csnp(struct isis_circuit *circuit, int level)
 		isis_tlvs_add_csnp_entries(tlvs, start, stop, num_lsps,
 					   &circuit->area->lspdb[level - 1],
 					   &last_lsp);
+
+		/*
+		 * RFC 9666 Area Proxy — CSNP Boundary Filter:
+		 * On boundary circuits, remove LSP entries for Inside Routers.
+		 */
+		if (circuit->is_area_proxy_boundary
+		    && circuit->area->area_proxy_enabled
+		    && level == ISIS_LEVEL2) {
+			struct isis_lsp_entry *entry, *prev, *next;
+			prev = NULL;
+			entry = (struct isis_lsp_entry *)tlvs->lsp_entries.head;
+			while (entry) {
+				next = entry->next;
+				if (isis_sysid_in_l1_lsdb(
+					    circuit->area, entry->id)) {
+					/* Remove from linked list */
+					if (prev)
+						prev->next = next;
+					else
+						tlvs->lsp_entries.head =
+							(struct isis_item *)next;
+					if ((struct isis_item *)entry ==
+					    tlvs->lsp_entries.head)
+						/* Update tail if last element */
+						;
+					tlvs->lsp_entries.count--;
+				} else {
+					prev = entry;
+				}
+				entry = next;
+			}
+		}
 		/*
 		 * Update the stop lsp_id before encoding this CSNP.
 		 */
