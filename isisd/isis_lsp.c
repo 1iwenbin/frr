@@ -557,6 +557,13 @@ void lsp_update(struct isis_lsp *lsp, struct isis_lsp_hdr *hdr,
 		isis_spf_schedule(lsp->area, lsp->level);
 		isis_te_lsp_event(lsp, LSP_UPD);
 	}
+
+	/* RFC 9666: L1 LSDB 变化时触发 Proxy LSP 重新聚合 */
+	if (lsp->level == ISIS_LEVEL1
+	    && lsp->area->area_proxy_enabled
+	    && !isis_lsp_is_proxy_lsp(lsp)
+	    && lsp->hdr.seqno)
+		isis_area_proxy_lsp_regenerate_schedule(lsp->area);
 }
 
 /* creation of LSP directly from what we received */
@@ -623,6 +630,13 @@ void lsp_insert(struct lspdb_head *head, struct isis_lsp *lsp)
 		isis_spf_schedule(lsp->area, lsp->level);
 		isis_te_lsp_event(lsp, LSP_ADD);
 	}
+
+	/* RFC 9666: L1 LSDB 变化时触发 Proxy LSP 重新聚合 */
+	if (lsp->level == ISIS_LEVEL1
+	    && lsp->area->area_proxy_enabled
+	    && !isis_lsp_is_proxy_lsp(lsp)
+	    && lsp->hdr.seqno)
+		isis_area_proxy_lsp_regenerate_schedule(lsp->area);
 }
 
 /*
