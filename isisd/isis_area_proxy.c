@@ -508,6 +508,12 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	if (!area || !area->area_proxy_enabled)
 		return -1;
 
+	/* Ensure lsp_mtu is initialized before first Proxy LSP generation.
+	 * During config parsing, area->lsp_mtu may still be 0, causing
+	 * lsp_adjust_stream() to create a stream too small for TLVs. */
+	if (area->lsp_mtu == 0)
+		area->lsp_mtu = DEFAULT_LSP_MTU;
+
 	/* Check if proxy_sysid is configured */
 	bool sysid_zero = true;
 	for (int i = 0; i < ISIS_SYS_ID_LEN; i++) {
@@ -534,9 +540,12 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	lsp_id[ISIS_SYS_ID_LEN] = 0;     /* pseudo ID */
 	lsp_id[ISIS_SYS_ID_LEN + 1] = 0; /* fragment ID */
 
-	/* Remove old Proxy LSP from LSDB if it exists */
+	/* Remove old Proxy LSP from LSDB if it exists, remembering
+	 * its seqno so we can increment (normal LSPs auto-increment). */
+	uint32_t new_seqno = 1;
 	if (area->proxy_lsp[ISIS_LEVEL2 - 1]) {
 		struct isis_lsp *old = area->proxy_lsp[ISIS_LEVEL2 - 1];
+		new_seqno = old->hdr.seqno + 1;
 		lspdb_del(&area->lspdb[ISIS_LEVEL2 - 1], old);
 		lsp_free(old);
 		area->proxy_lsp[ISIS_LEVEL2 - 1] = NULL;
@@ -547,7 +556,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	/* Create new Proxy LSP */
 	lsp = lsp_new(area, lsp_id,
 		      area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
-		      1,                 /* seqno starts at 1 */
+		      new_seqno,          /* increment seqno on re-gen */
 		      IS_LEVEL_1_AND_2,  /* lsp_bits: L1L2-capable */
 		      0,                 /* checksum (computed later) */
 		      NULL,              /* lsp0 */
