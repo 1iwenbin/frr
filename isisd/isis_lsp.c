@@ -298,12 +298,19 @@ static void lsp_add_auth(struct isis_lsp *lsp)
 	isis_tlvs_add_auth(lsp->tlvs, passwd);
 }
 
-static void lsp_pack_pdu(struct isis_lsp *lsp)
+void lsp_pack_pdu_ext(struct isis_lsp *lsp)
 {
 	if (!lsp->tlvs)
 		lsp->tlvs = isis_alloc_tlvs();
 
 	lsp_add_auth(lsp);
+
+	/* Ensure stream is large enough (same fix as lsp_build_from_tlvs) */
+	lsp_adjust_stream(lsp);
+	if (STREAM_SIZE(lsp->pdu) < (size_t)(LLC_LEN + DEFAULT_LSP_MTU)) {
+		stream_free(lsp->pdu);
+		lsp->pdu = stream_new_expandable(LLC_LEN + DEFAULT_LSP_MTU);
+	}
 
 	size_t len_pointer;
 	put_lsp_hdr(lsp, &len_pointer, false);
@@ -313,6 +320,11 @@ static void lsp_pack_pdu(struct isis_lsp *lsp)
 	lsp->hdr.checksum =
 		ntohs(fletcher_checksum(STREAM_DATA(lsp->pdu) + 12,
 					stream_get_endp(lsp->pdu) - 12, 12));
+}
+
+static void lsp_pack_pdu(struct isis_lsp *lsp)
+{
+	lsp_pack_pdu_ext(lsp);
 }
 
 void lsp_inc_seqno(struct isis_lsp *lsp, uint32_t seqno)
@@ -581,7 +593,7 @@ struct isis_lsp *lsp_new_from_recv(struct isis_lsp_hdr *hdr,
 	return lsp;
 }
 
-static void lsp_adjust_stream(struct isis_lsp *lsp)
+void lsp_adjust_stream(struct isis_lsp *lsp)
 {
 	if (lsp->pdu) {
 		if (STREAM_SIZE(lsp->pdu) == LLC_LEN + lsp->area->lsp_mtu)
@@ -2294,32 +2306,30 @@ void lsp_set_all_srmflags(struct isis_lsp *lsp, bool set)
 	frr_each (isis_circuit_list, &lsp->area->circuit_list, circuit) {
 		if (set) {
 			/*
-			 * RFC 9666 Area Proxy: skip boundary circuits for Inside LSPs.
+			 * RFC 9666 Area Proxy: skip boundary circuits
+			 * for Inside LSPs, EXCEPT edge routers whose L2 LSP
+			 * contains IS neighbors pointing Outside.
+			 * Edge router LSPs are needed for SPF to reach the
+			 * Proxy node; pure Inside LSPs are filtered.
 			 */
 			if (lsp->area->area_proxy_enabled
 			    && !isis_lsp_is_proxy_lsp(lsp)
 			    && isis_sysid_in_l1_lsdb(lsp->area, lsp->hdr.lsp_id)) {
-				bool skip = false;
-				if (circuit->circ_type == CIRCUIT_T_P2P
-				    && circuit->u.p2p.neighbor
-				    && circuit->u.p2p.neighbor->adj_state == ISIS_ADJ_UP
-				    && !isis_sysid_in_l1_lsdb(lsp->area,
-						circuit->u.p2p.neighbor->sysid))
-					skip = true;
-				else if (circuit->circ_type == CIRCUIT_T_BROADCAST) {
-					struct listnode *node;
-					struct isis_adjacency *adj;
-					for (ALL_LIST_ELEMENTS_RO(
-						     circuit->u.bc.adjdb[ISIS_LEVEL2 - 1],
-						     node, adj))
-						if (adj->adj_state == ISIS_ADJ_UP
-						    && !isis_sysid_in_l1_lsdb(
-							    lsp->area, adj->sysid)) {
-							skip = true;
+				/* Check if this is an edge router LSP */
+				bool is_edge = false;
+				if (lsp->tlvs) {
+					struct isis_extended_reach *reach;
+					for (reach = (struct isis_extended_reach *)
+						     lsp->tlvs->extended_reach.head;
+					     reach; reach = reach->next) {
+						if (!isis_sysid_in_l1_lsdb(
+							    lsp->area, reach->id)) {
+							is_edge = true;
 							break;
 						}
+					}
 				}
-				if (skip)
+				if (!is_edge && circuit->is_area_proxy_boundary)
 					continue;
 			}
 
@@ -2601,23 +2611,39 @@ bool isis_lsp_is_proxy_lsp(const struct isis_lsp *lsp)
  */
 void lsp_build_from_tlvs(struct isis_lsp *lsp)
 {
-	if (!lsp || !lsp->tlvs)
+	if (!lsp)
 		return;
+
+	if (!lsp->tlvs)
+		lsp->tlvs = isis_alloc_tlvs();
+
+	lsp_add_auth(lsp);
+
+	/* Ensure stream is large enough for TLVs.
+	 * area->lsp_mtu may not be initialized when Proxy LSP is first
+	 * generated during config parsing, resulting in a stream too
+	 * small for any TLVs.  Force at least DEFAULT_LSP_MTU. */
+	lsp_adjust_stream(lsp);
+	if (STREAM_SIZE(lsp->pdu) < (size_t)(LLC_LEN + DEFAULT_LSP_MTU)) {
+		stream_free(lsp->pdu);
+		lsp->pdu = stream_new_expandable(LLC_LEN + DEFAULT_LSP_MTU);
+	}
 
 	size_t len_pointer;
 
 	/* Reset the stream and write a fresh LSP header */
-	lsp_adjust_stream(lsp);
 	put_lsp_hdr(lsp, &len_pointer, false);
 
 	/* Pack TLVs into the stream after the header */
 	isis_pack_tlvs(lsp->tlvs, lsp->pdu, len_pointer, false, true);
 
-	/* Update PDU length and compute checksum */
+	/* Update PDU length and compute checksum.
+	 * fletcher_checksum() writes the correct checksum bytes directly
+	 * into the PDU buffer, so no additional stream write is needed. */
 	lsp->hdr.pdu_len = stream_get_endp(lsp->pdu);
 	lsp->hdr.checksum =
 		ntohs(fletcher_checksum(STREAM_DATA(lsp->pdu) + 12,
-					stream_get_endp(lsp->pdu) - 12, 12));
+					lsp->hdr.pdu_len - 12, 12));
 }
 
 void lsp_init(void)

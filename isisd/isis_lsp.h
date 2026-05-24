@@ -159,6 +159,9 @@ bool isis_lsp_is_proxy_lsp(const struct isis_lsp *lsp);
 /* Build LSP PDU from pre-constructed TLVs (used by Area Proxy) */
 void lsp_build_from_tlvs(struct isis_lsp *lsp);
 
+/* Pack LSP PDU from TLVs (non-static wrapper for lsp_pack_pdu) */
+void lsp_pack_pdu_ext(struct isis_lsp *lsp);
+
 void lsp_init(void);
 
 #endif /* ISIS_LSP */

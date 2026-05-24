@@ -432,23 +432,39 @@ void isis_adj_state_change(struct isis_adjacency **padj,
 		}
 	}
 
-	hook_call(isis_adj_state_change_hook, adj);
-
 	/*
 	 * RFC 9666 Area Proxy:
-	 * When an L2 adjacency comes UP with a neighbor NOT in our L1 LSDB,
-	 * mark the circuit as a boundary interface to the Outside.
+	 * When an L2 adjacency comes UP on a circuit that has no L1
+	 * neighbors, mark it as a boundary interface to the Outside.
+	 * We detect Outside circuits by checking if there are any L1
+	 * adjacencies — Inside routers always run L1, Outside routers
+	 * are L2-only.
 	 *
-	 * KNOWN: boundary marking happens after hook_call, so the initial
-	 * LSP flood in the hook may send Inside L2 LSPs to Outside before
-	 * the boundary is marked.  This is cosmetic for small deployments
-	 * (LSPs age out in ~20 min).  Tracked in Phase 11.
+	 * Phase 11: boundary moved above hook_call so that the initial
+	 * LSP flood triggered by lsp_handle_adj_state_change is correctly
+	 * filtered.  The is_area_proxy_boundary flag is then used by
+	 * lsp_set_all_srmflags() to skip boundary circuits for Inside LSPs.
 	 */
 	if (adj && adj->adj_state == ISIS_ADJ_UP
 	    && adj->circuit->area->area_proxy_enabled
-	    && (adj->level & ISIS_LEVEL2)
-	    && !isis_sysid_in_l1_lsdb(adj->circuit->area, adj->sysid)) {
-		if (!adj->circuit->is_area_proxy_boundary) {
+	    && (adj->level & ISIS_LEVEL2)) {
+		/* Only mark as boundary if this circuit has no L1 neighbors */
+		bool has_l1_neighbor = false;
+		if (adj->circuit->circ_type == CIRCUIT_T_BROADCAST) {
+			struct listnode *node;
+			struct isis_adjacency *a;
+			for (ALL_LIST_ELEMENTS_RO(
+				     adj->circuit->u.bc.adjdb[ISIS_LEVEL1 - 1],
+				     node, a))
+				if (a->adj_state == ISIS_ADJ_UP) {
+					has_l1_neighbor = true;
+					break;
+				}
+		} else if (adj->circuit->circ_type == CIRCUIT_T_P2P) {
+			has_l1_neighbor = (adj->level & ISIS_LEVEL1);
+		}
+		if (!has_l1_neighbor
+		    && !adj->circuit->is_area_proxy_boundary) {
 			adj->circuit->is_area_proxy_boundary = true;
 			zlog_info("Area Proxy: circuit %s marked as boundary (neighbor %pSY)",
 				  adj->circuit->interface->name, adj->sysid);
@@ -461,8 +477,22 @@ void isis_adj_state_change(struct isis_adjacency **padj,
 					continue;
 				lsp_set_all_srmflags(lsp, true);
 			}
+
+			isis_area_proxy_lsp_regenerate_schedule(
+				adj->circuit->area);
+		}
+
+		/* If L1 adjacency is UP, this is an Inside circuit —
+		 * clear the boundary flag if it was previously set. */
+		if (has_l1_neighbor
+		    && adj->circuit->is_area_proxy_boundary) {
+			adj->circuit->is_area_proxy_boundary = false;
+			zlog_info("Area Proxy: circuit %s unmarked as boundary (L1 neighbor %pSY)",
+				  adj->circuit->interface->name, adj->sysid);
 		}
 	}
+
+	hook_call(isis_adj_state_change_hook, adj);
 
 	if (del) {
 		isis_delete_adj(adj);

@@ -454,6 +454,41 @@ static void isis_area_proxy_lsp_regenerate_timer(struct event *t)
 
 	area->t_proxy_lsp_refresh = NULL;
 
+	/*
+	 * Re-evaluate boundary circuits: during startup, L2 adjacencies
+	 * may come up before L1, causing Inside circuits to be incorrectly
+	 * marked as boundary.  Now that the L1 LSDB has had time to
+	 * converge, unmark circuits that have L1 neighbors.
+	 */
+	{
+		struct isis_circuit *circuit;
+		frr_each (isis_circuit_list, &area->circuit_list, circuit) {
+			if (!circuit->is_area_proxy_boundary)
+				continue;
+
+			bool has_l1 = false;
+			if (circuit->circ_type == CIRCUIT_T_BROADCAST) {
+				struct listnode *node;
+				struct isis_adjacency *a;
+				for (ALL_LIST_ELEMENTS_RO(
+					     circuit->u.bc.adjdb[ISIS_LEVEL1 - 1],
+					     node, a))
+					if (a->adj_state == ISIS_ADJ_UP) {
+						has_l1 = true;
+						break;
+					}
+			} else if (circuit->circ_type == CIRCUIT_T_P2P
+				   && circuit->u.p2p.neighbor) {
+				has_l1 = (circuit->u.p2p.neighbor->level & ISIS_LEVEL1);
+			}
+			if (has_l1) {
+				circuit->is_area_proxy_boundary = false;
+				zlog_info("Area Proxy: circuit %s unmarked as boundary (has L1 neighbor)",
+					  circuit->interface->name);
+			}
+		}
+	}
+
 	zlog_debug("Area Proxy: timer fired, regenerating Proxy LSP for area %s",
 		   area->area_tag);
 
@@ -526,13 +561,16 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	lsp->own_lsp = 0; /* not "our own" LSP */
 	area->proxy_lsp[ISIS_LEVEL2 - 1] = lsp;
 
+	/* Build the PDU from our aggregated TLVs BEFORE inserting into LSDB.
+	 * Use lsp_pack_pdu_ext — the exact same code path that normal LSPs
+	 * use, which is known to produce correct checksums. */
+	lsp_pack_pdu_ext(lsp);
+
 	/* Insert into L2 LSDB */
 	lsp_insert(&area->lspdb[ISIS_LEVEL2 - 1], lsp);
 
-	zlog_info("Area Proxy: generated/regenerated Proxy LSP %pLS", lsp_id);
-
-	/* Build the PDU from our aggregated TLVs */
-	lsp_build_from_tlvs(lsp);
+	zlog_info("Area Proxy: generated/regenerated Proxy LSP %pLS, pdu_len=%u",
+		  lsp_id, lsp->hdr.pdu_len);
 
 	/* Flood to all L2 circuits */
 	{
