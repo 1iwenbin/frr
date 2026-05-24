@@ -513,7 +513,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	lsp = lsp_new(area, lsp_id,
 		      area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
 		      1,                 /* seqno starts at 1 */
-		      0,                 /* lsp_bits */
+		      IS_LEVEL_1_AND_2,  /* lsp_bits: L1L2-capable */
 		      0,                 /* checksum (computed later) */
 		      NULL,              /* lsp0 */
 		      ISIS_LEVEL2);

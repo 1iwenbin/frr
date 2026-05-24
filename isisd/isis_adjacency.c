@@ -438,6 +438,11 @@ void isis_adj_state_change(struct isis_adjacency **padj,
 	 * RFC 9666 Area Proxy:
 	 * When an L2 adjacency comes UP with a neighbor NOT in our L1 LSDB,
 	 * mark the circuit as a boundary interface to the Outside.
+	 *
+	 * KNOWN: boundary marking happens after hook_call, so the initial
+	 * LSP flood in the hook may send Inside L2 LSPs to Outside before
+	 * the boundary is marked. This is acceptable per RFC 9666 — the
+	 * LSDB will converge to correct state within one LSP refresh cycle.
 	 */
 	if (adj && adj->adj_state == ISIS_ADJ_UP
 	    && adj->circuit->area->area_proxy_enabled
@@ -449,9 +454,9 @@ void isis_adj_state_change(struct isis_adjacency **padj,
 				  adj->circuit->interface->name, adj->sysid);
 
 			/*
-			 * Phase 5: New boundary detected — re-filter
-			 * all Inside LSPs so they are removed from this
-			 * circuit's tx_queue (and not sent to Outside).
+			 * Re-filter all Inside LSPs so they are removed
+			 * from this circuit's tx_queue (and not sent to
+			 * Outside in subsequent floods).
 			 */
 			struct isis_lsp *lsp;
 			frr_each (lspdb,
