@@ -58,6 +58,11 @@ struct isis_lsp {
 	struct list *flooding_neighbors[TX_LSP_CIRCUIT_SCOPED + 1];
 	char *flooding_interface;
 	bool flooding_circuit_scoped;
+
+	/* RFC 9666 Area Proxy: cached edge-router flag.
+	 * Set once after L1 LSDB converges, read by boundary filter
+	 * in lsp_set_all_srmflags() to avoid per-flood LSDB queries. */
+	bool is_edge_router;
 };
 
 extern int lspdb_compare(const struct isis_lsp *a, const struct isis_lsp *b);

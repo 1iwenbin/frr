@@ -2302,31 +2302,17 @@ void lsp_set_all_srmflags(struct isis_lsp *lsp, bool set)
 		if (set) {
 			/*
 			 * RFC 9666 Area Proxy: skip boundary circuits
-			 * for Inside LSPs, EXCEPT edge routers whose L2 LSP
-			 * contains IS neighbors pointing Outside.
-			 * Edge router LSPs are needed for SPF to reach the
-			 * Proxy node; pure Inside LSPs are filtered.
+			 * for Inside LSPs that are NOT edge routers.
+			 * The is_edge_router flag is cached in the LSP
+			 * struct by the Area Proxy timer callback after
+			 * L1 LSDB converges, avoiding per-flood LSDB queries.
 			 */
 			if (lsp->area->area_proxy_enabled
 			    && !isis_lsp_is_proxy_lsp(lsp)
-			    && isis_sysid_in_l1_lsdb(lsp->area, lsp->hdr.lsp_id)) {
-				/* Check if this is an edge router LSP */
-				bool is_edge = false;
-				if (lsp->tlvs) {
-					struct isis_extended_reach *reach;
-					for (reach = (struct isis_extended_reach *)
-						     lsp->tlvs->extended_reach.head;
-					     reach; reach = reach->next) {
-						if (!isis_sysid_in_l1_lsdb(
-							    lsp->area, reach->id)) {
-							is_edge = true;
-							break;
-						}
-					}
-				}
-				if (!is_edge && circuit->is_area_proxy_boundary)
-					continue;
-			}
+			    && isis_sysid_in_l1_lsdb(lsp->area, lsp->hdr.lsp_id)
+			    && !lsp->is_edge_router
+			    && circuit->is_area_proxy_boundary)
+				continue;
 
 			isis_tx_queue_add(circuit->tx_queue, lsp,
 					  TX_LSP_NORMAL);

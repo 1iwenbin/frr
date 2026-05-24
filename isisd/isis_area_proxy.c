@@ -489,6 +489,38 @@ static void isis_area_proxy_lsp_regenerate_timer(struct event *t)
 		}
 	}
 
+	/*
+	 * Cache edge-router flag on Inside L2 LSPs.
+	 * Rather than querying the L1 LSDB on every flood (which may
+	 * be empty at startup), we compute once after convergence and
+	 * store the result in lsp->is_edge_router.
+	 * An Inside LSP is an edge router iff it has at least one
+	 * IS neighbor NOT in the L1 LSDB (i.e., an Outside neighbor).
+	 */
+	{
+		struct isis_lsp *lsp;
+		frr_each (lspdb, &area->lspdb[ISIS_LEVEL2 - 1], lsp) {
+			if (isis_lsp_is_proxy_lsp(lsp))
+				continue;
+			if (!isis_sysid_in_l1_lsdb(area, lsp->hdr.lsp_id))
+				continue;
+
+			lsp->is_edge_router = false;
+			if (lsp->tlvs) {
+				struct isis_extended_reach *reach;
+				for (reach = (struct isis_extended_reach *)
+					     lsp->tlvs->extended_reach.head;
+				     reach; reach = reach->next) {
+					if (!isis_sysid_in_l1_lsdb(area,
+								    reach->id)) {
+						lsp->is_edge_router = true;
+						break;
+					}
+				}
+			}
+		}
+	}
+
 	zlog_debug("Area Proxy: timer fired, regenerating Proxy LSP for area %s",
 		   area->area_tag);
 
