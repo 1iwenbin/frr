@@ -305,12 +305,7 @@ void lsp_pack_pdu_ext(struct isis_lsp *lsp)
 
 	lsp_add_auth(lsp);
 
-	/* Ensure stream is large enough (same fix as lsp_build_from_tlvs) */
 	lsp_adjust_stream(lsp);
-	if (STREAM_SIZE(lsp->pdu) < (size_t)(LLC_LEN + DEFAULT_LSP_MTU)) {
-		stream_free(lsp->pdu);
-		lsp->pdu = stream_new_expandable(LLC_LEN + DEFAULT_LSP_MTU);
-	}
 
 	size_t len_pointer;
 	put_lsp_hdr(lsp, &len_pointer, false);
@@ -2619,15 +2614,7 @@ void lsp_build_from_tlvs(struct isis_lsp *lsp)
 
 	lsp_add_auth(lsp);
 
-	/* Ensure stream is large enough for TLVs.
-	 * area->lsp_mtu may not be initialized when Proxy LSP is first
-	 * generated during config parsing, resulting in a stream too
-	 * small for any TLVs.  Force at least DEFAULT_LSP_MTU. */
 	lsp_adjust_stream(lsp);
-	if (STREAM_SIZE(lsp->pdu) < (size_t)(LLC_LEN + DEFAULT_LSP_MTU)) {
-		stream_free(lsp->pdu);
-		lsp->pdu = stream_new_expandable(LLC_LEN + DEFAULT_LSP_MTU);
-	}
 
 	size_t len_pointer;
 
