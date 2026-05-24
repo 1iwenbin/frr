@@ -441,8 +441,8 @@ void isis_adj_state_change(struct isis_adjacency **padj,
 	 *
 	 * KNOWN: boundary marking happens after hook_call, so the initial
 	 * LSP flood in the hook may send Inside L2 LSPs to Outside before
-	 * the boundary is marked. This is acceptable per RFC 9666 — the
-	 * LSDB will converge to correct state within one LSP refresh cycle.
+	 * the boundary is marked.  This is cosmetic for small deployments
+	 * (LSPs age out in ~20 min).  Tracked in Phase 11.
 	 */
 	if (adj && adj->adj_state == ISIS_ADJ_UP
 	    && adj->circuit->area->area_proxy_enabled
@@ -453,11 +453,6 @@ void isis_adj_state_change(struct isis_adjacency **padj,
 			zlog_info("Area Proxy: circuit %s marked as boundary (neighbor %pSY)",
 				  adj->circuit->interface->name, adj->sysid);
 
-			/*
-			 * Re-filter all Inside LSPs so they are removed
-			 * from this circuit's tx_queue (and not sent to
-			 * Outside in subsequent floods).
-			 */
 			struct isis_lsp *lsp;
 			frr_each (lspdb,
 				  &adj->circuit->area->lspdb[ISIS_LEVEL2 - 1],
