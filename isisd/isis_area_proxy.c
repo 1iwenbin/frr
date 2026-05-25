@@ -426,8 +426,60 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 	}
 
 	/* ================================================================
-	 * STEP 4: Router Capability TLV (242) — skip for MVP-1
+	 * STEP 4: Router Capability TLV (242)
+	 *
+	 * Gather SR-MPLS / SRv6 capabilities from the first L1 LSP
+	 * that has a router_cap TLV.  In practice all satellites in a
+	 * Stripe share the same SRGB / SRv6 Locator — we use the first
+	 * one found and copy it into the Proxy LSP so that Outside
+	 * Routers can compute SR paths that traverse this Stripe.
 	 * ================================================================ */
+
+	{
+		struct isis_lsp *lsp_rcap = NULL;
+
+		frr_each (lspdb, &area->lspdb[ISIS_LEVEL1 - 1], lsp) {
+			if (lsp->hdr.seqno == 0 ||
+			    lsp->hdr.rem_lifetime == 0)
+				continue;
+			if (!lsp->tlvs || !lsp->tlvs->router_cap)
+				continue;
+
+			lsp_rcap = lsp;
+			break;
+		}
+
+		if (lsp_rcap) {
+			struct isis_router_cap *src =
+				lsp_rcap->tlvs->router_cap;
+			struct isis_router_cap *dst =
+				isis_tlvs_init_router_capability(proxy_tlvs);
+
+			/* Copy router-id, flags, SRGB, SRLB, algorithms, MSD */
+			dst->router_id = src->router_id;
+			dst->flags     = src->flags;
+			dst->srgb      = src->srgb;
+			dst->srlb      = src->srlb;
+			memcpy(dst->algo, src->algo, sizeof(src->algo));
+			dst->msd       = src->msd;
+#ifndef FABRICD
+			/* Copy Flex-Algo definitions */
+			for (int i = 0; i < SR_ALGORITHM_COUNT; i++) {
+				if (src->fads[i])
+					isis_tlvs_set_router_capability_fad(
+						proxy_tlvs,
+						&src->fads[i]->fad,
+						i, NULL);
+			}
+#endif
+			/* Copy SRv6 capabilities */
+			dst->srv6_cap = src->srv6_cap;
+			dst->srv6_msd = src->srv6_msd;
+
+			zlog_debug("Area Proxy: aggregated Router Capability "
+				  "from LSP %pLS", lsp_rcap->hdr.lsp_id);
+		}
+	}
 
 	/* ================================================================
 	 * STEP 5: Multi-Topology — skip for MVP-1
