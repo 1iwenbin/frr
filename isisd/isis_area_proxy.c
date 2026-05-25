@@ -327,11 +327,13 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 	if (iso_address_list_first(&area->area_addrs))
 		isis_tlvs_add_area_addresses(proxy_tlvs, &area->area_addrs);
 
-	/* 1c. Dynamic Hostname TLV (137) */
+	/* 1c. Dynamic Hostname TLV (137) — use proxy-sysid suffix for uniqueness */
 	{
 		char hostname[256];
 		snprintf(hostname, sizeof(hostname),
-			 "PROXY-%s", area->area_tag);
+			 "PROXY-%02x%02x",
+			 area->area_proxy_sysid[4],
+			 area->area_proxy_sysid[5]);
 		isis_tlvs_set_dynamic_hostname(proxy_tlvs, hostname);
 	}
 
