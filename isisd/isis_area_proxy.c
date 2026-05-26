@@ -257,6 +257,12 @@ static struct prefix_agg_entry *prefix_agg_add(struct prefix_agg_table *tbl,
 
 /*
  * Callback: collect IP prefixes from L1 LSDB.
+ *
+ * NOTE: isis_lsp_iterate_ip_reach() passes (struct prefix *) cast from
+ * struct prefix_ipv6, whose internal layout differs from struct prefix
+ * (address field at offset 4 vs offset 8).  We must normalise to a
+ * real struct prefix before using prefix_same / prefix_copy, otherwise
+ * IPv6 addresses are read from the wrong offset and aggregation fails.
  */
 static int proxy_aggregate_ip_reach_cb(const struct prefix *prefix,
 					uint32_t metric, bool external,
@@ -264,10 +270,17 @@ static int proxy_aggregate_ip_reach_cb(const struct prefix *prefix,
 					void *arg)
 {
 	struct prefix_agg_table *tbl = arg;
-	struct prefix_agg_entry *e = prefix_agg_lookup(tbl, prefix);
+	struct prefix pfx_normalised;
 
+	/* Normalise the pointer: copy into a real struct prefix so that
+	 * prefix_same() / prefix_copy() access the address at the correct
+	 * offset regardless of whether the original was struct prefix_ipv4
+	 * or struct prefix_ipv6. */
+	prefix_copy(&pfx_normalised, prefix);
+
+	struct prefix_agg_entry *e = prefix_agg_lookup(tbl, &pfx_normalised);
 	if (!e) {
-		e = prefix_agg_add(tbl, prefix);
+		e = prefix_agg_add(tbl, &pfx_normalised);
 		if (!e)
 			return LSP_ITER_STOP;
 	}
@@ -416,11 +429,17 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 					proxy_tlvs, p4, e->min_metric,
 					false, NULL);
 			} else if (e->prefix.family == AF_INET6) {
-				struct prefix_ipv6 *p6 =
-					(struct prefix_ipv6 *)&e->prefix;
+				/* Build a proper struct prefix_ipv6 — do not
+				 * cast from struct prefix because their
+				 * internal address offsets differ (8 vs 4). */
+				struct prefix_ipv6 p6 = {
+					.family = AF_INET6,
+					.prefixlen = e->prefix.prefixlen,
+					.prefix = e->prefix.u.prefix6,
+				};
 				isis_tlvs_add_ipv6_reach(
 					proxy_tlvs, ISIS_MT_IPV4_UNICAST,
-					p6, e->min_metric, false, NULL);
+					&p6, e->min_metric, false, NULL);
 			}
 		}
 	}
