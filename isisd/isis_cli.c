@@ -3754,6 +3754,19 @@ void isis_cli_init(void)
 	install_element(INTERFACE_NODE, &isis_bfd_cmd);
 	install_element(INTERFACE_NODE, &isis_bfd_profile_cmd);
 
+	install_element(INTERFACE_NODE, &isis_hello_interval_cmd);
+	install_element(INTERFACE_NODE, &no_isis_hello_interval_cmd);
+	install_element(INTERFACE_NODE, &isis_hello_multiplier_cmd);
+	install_element(INTERFACE_NODE, &no_isis_hello_multiplier_cmd);
+	install_element(INTERFACE_NODE, &isis_hello_padding_cmd);
+	install_element(INTERFACE_NODE, &isis_circuit_type_cmd);
+	install_element(INTERFACE_NODE, &no_isis_circuit_type_cmd);
+	install_element(INTERFACE_NODE, &isis_metric_cmd);
+	install_element(INTERFACE_NODE, &no_isis_metric_cmd);
+	install_element(INTERFACE_NODE, &isis_passive_cmd);
+	install_element(INTERFACE_NODE, &isis_priority_cmd);
+	install_element(INTERFACE_NODE, &isis_network_cmd);
+
 	install_element(ISIS_NODE, &net_cmd);
 
 	install_element(ISIS_NODE, &is_type_cmd);
