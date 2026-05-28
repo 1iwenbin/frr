@@ -742,11 +742,7 @@ struct ly_ctx *yang_ctx_new_setup(bool embedded_modules, bool explicit_compile)
 void yang_init(bool embedded_modules, bool defer_compile)
 {
 	/* Initialize libyang global parameters that affect all containers. */
-#if LY_VERSION_MAJOR >= 3
 	ly_set_log_clb(ly_log_cb);
-#else
-	ly_set_log_clb(ly_log_cb, 1);
-#endif
 	ly_log_options(LY_LOLOG | LY_LOSTORE);
 
 	/* Initialize libyang container for native models. */
