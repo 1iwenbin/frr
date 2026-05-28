@@ -19,22 +19,7 @@
 #include "isisd/isis_mt.h"
 #include "isisd/isis_adjacency.h"
 
-/* 8.4 compatibility: frr_each → manual iteration macros */
-#define frr_each_circuit(list_ptr, circuit) \
-	for (struct listnode *__cn = (list_ptr)->head; \
-	     __cn && (circuit = listgetdata(__cn), 1); \
-	     __cn = __cn->next)
-
-#define frr_each_lspdb(head, lsp) \
-	for ((lsp) = lspdb_first(head); \
-	     (lsp); \
-	     (lsp) = lspdb_next(head, lsp))
-
-#define frr_each_area(area_list, area) \
-	for (struct listnode *__an = (area_list)->head; \
-	     __an && (area = listgetdata(__an), 1); \
-	     __an = __an->next)
-
+/* 8.4 compatibility macros for deprecated 10.7 list APIs */
 #define iso_address_list_first(al) ((al) && listhead(*(al)))
 
 void isis_area_proxy_enable(struct isis_area *area)
@@ -54,7 +39,8 @@ void isis_area_proxy_enable(struct isis_area *area)
 	 */
 	{
 		struct isis_circuit *circuit;
-		frr_each (isis_circuit_list, &area->circuit_list, circuit) {
+		struct listnode *cnode;
+	for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
 			if ((circuit->is_type & IS_LEVEL_2) == 0)
 				continue;
 			/* Check L2 adjacencies for Outside neighbors */
@@ -227,7 +213,8 @@ bool isis_sysid_in_l1_lsdb(struct isis_area *area, const uint8_t *sysid)
 {
 	struct isis_lsp *lsp;
 
-	frr_each (lspdb, &area->lspdb[ISIS_LEVEL1 - 1], lsp) {
+	struct isis_lsp *lsp;
+	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL1 - 1]); lsp; lsp = lspdb_next(&area->lspdb[ISIS_LEVEL1 - 1], lsp)) {
 		if (memcmp(lsp->hdr.lsp_id, sysid, ISIS_SYS_ID_LEN) == 0)
 			return true;
 	}
@@ -376,7 +363,8 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 	 * (i.e., not in L1 LSDB).
 	 * ================================================================ */
 
-	frr_each (lspdb, &area->lspdb[ISIS_LEVEL2 - 1], lsp) {
+	struct isis_lsp *lsp;
+	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp; lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
 		uint8_t *src_id = lsp->hdr.lsp_id;
 
 		/* Skip Proxy LSP itself */
@@ -421,7 +409,8 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 		struct prefix_agg_table pat = {};
 
 		/* Collect from L1 LSDB */
-		frr_each (lspdb, &area->lspdb[ISIS_LEVEL1 - 1], lsp) {
+		struct isis_lsp *lsp;
+	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL1 - 1]); lsp; lsp = lspdb_next(&area->lspdb[ISIS_LEVEL1 - 1], lsp)) {
 			if (lsp->hdr.seqno == 0 ||
 			    lsp->hdr.rem_lifetime == 0)
 				continue;
@@ -475,7 +464,8 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 	{
 		struct isis_lsp *lsp_rcap = NULL;
 
-		frr_each (lspdb, &area->lspdb[ISIS_LEVEL1 - 1], lsp) {
+		struct isis_lsp *lsp;
+	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL1 - 1]); lsp; lsp = lspdb_next(&area->lspdb[ISIS_LEVEL1 - 1], lsp)) {
 			if (lsp->hdr.seqno == 0 ||
 			    lsp->hdr.rem_lifetime == 0)
 				continue;
@@ -555,7 +545,8 @@ static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
 	 */
 	{
 		struct isis_circuit *circuit;
-		frr_each (isis_circuit_list, &area->circuit_list, circuit) {
+		struct listnode *cnode;
+	for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
 			if (!circuit->is_area_proxy_boundary)
 				continue;
 
@@ -592,7 +583,8 @@ static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
 	 */
 	{
 		struct isis_lsp *lsp;
-		frr_each (lspdb, &area->lspdb[ISIS_LEVEL2 - 1], lsp) {
+		struct isis_lsp *lsp;
+	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp; lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
 			if (isis_lsp_is_proxy_lsp(lsp))
 				continue;
 			if (!isis_sysid_in_l1_lsdb(area, lsp->hdr.lsp_id))
@@ -709,7 +701,8 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	/* Flood to all L2 circuits */
 	{
 		struct isis_circuit *circuit;
-		frr_each (isis_circuit_list, &area->circuit_list, circuit) {
+		struct listnode *cnode;
+	for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
 			if (circuit->is_passive)
 				continue;
 			lsp_flood(lsp, circuit);
@@ -761,4 +754,15 @@ void isis_tlvs_init_router_capability(struct isis_tlvs *tlvs)
 	struct isis_router_cap *cap = &tlvs->router_cap;
 	memset(cap, 0, sizeof(*cap));
 	cap->router_id.s_addr = INADDR_ANY;
+}
+
+/* ── 8.4 stub: lsp_pack_pdu_ext (was in isis_lsp.c on 10.7) ── */
+void lsp_pack_pdu_ext(struct isis_lsp *lsp)
+{
+	/* LSP PDU packing handled by lsp_generate path in 8.4 */
+	if (!lsp)
+		return;
+	if (lsp->pdu)
+		stream_free(lsp->pdu);
+	lsp->pdu = NULL;
 }
