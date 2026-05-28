@@ -362,7 +362,6 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 	 * (i.e., not in L1 LSDB).
 	 * ================================================================ */
 
-	struct isis_lsp *lsp;
 	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp; lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
 		uint8_t *src_id = lsp->hdr.lsp_id;
 
