@@ -130,19 +130,39 @@ static int process_p2p_hello(struct iih_info *iih)
 			return ISIS_WARNING;
 		}
 
-		if (tw_adj->neighbor_set
-		    && (memcmp(tw_adj->neighbor_id, iih->circuit->isis->sysid,
-			       ISIS_SYS_ID_LEN)
-			|| tw_adj->neighbor_circuit_id
-				   != (uint32_t)iih->circuit->idx)) {
+		if (tw_adj->neighbor_set) {
+			bool neighbor_id_ok =
+				(memcmp(tw_adj->neighbor_id,
+					iih->circuit->isis->sysid,
+					ISIS_SYS_ID_LEN) == 0);
 
-			if (IS_DEBUG_ADJ_PACKETS) {
-				zlog_debug("ISIS-Adj (%s): Rcvd P2P IIH from (%s) which lists IS/Circuit different from us as neighbor.",
-					   iih->circuit->area->area_tag,
-					   iih->circuit->interface->name);
+			/* Area Proxy: also accept proxy-sysid as a valid
+			 * self-identifier for the 3-way handshake.  We
+			 * cannot require is_area_proxy_boundary here
+			 * because that flag is only set after the first
+			 * adjacency comes UP — a chicken-and-egg problem.
+			 */
+			if (!neighbor_id_ok
+			    && iih->circuit->area->area_proxy_enabled) {
+				neighbor_id_ok =
+					(memcmp(tw_adj->neighbor_id,
+						iih->circuit->area
+							->area_proxy_sysid,
+						ISIS_SYS_ID_LEN) == 0);
 			}
 
-			return ISIS_WARNING;
+			if (!neighbor_id_ok
+			    || tw_adj->neighbor_circuit_id
+				       != (uint32_t)iih->circuit->idx) {
+
+				if (IS_DEBUG_ADJ_PACKETS) {
+					zlog_debug("ISIS-Adj (%s): Rcvd P2P IIH from (%s) which lists IS/Circuit different from us as neighbor.",
+						   iih->circuit->area->area_tag,
+						   iih->circuit->interface->name);
+				}
+
+				return ISIS_WARNING;
+			}
 		}
 	}
 
@@ -1927,7 +1947,12 @@ static void put_hello_hdr(struct isis_circuit *circuit, int level,
 	fill_fixed_hdr(pdu_type, circuit->snd_stream);
 
 	stream_putc(circuit->snd_stream, circuit->is_type);
-	stream_put(circuit->snd_stream, circuit->isis->sysid, ISIS_SYS_ID_LEN);
+	stream_put(circuit->snd_stream,
+		   (circuit->is_area_proxy_boundary && circuit->area &&
+		    circuit->area->area_proxy_enabled)
+			   ? circuit->area->area_proxy_sysid
+			   : circuit->isis->sysid,
+		   ISIS_SYS_ID_LEN);
 
 	uint32_t holdtime = circuit->hello_multiplier[level - 1]
 			    * circuit->hello_interval[level - 1];
