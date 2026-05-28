@@ -213,7 +213,6 @@ bool isis_sysid_in_l1_lsdb(struct isis_area *area, const uint8_t *sysid)
 {
 	struct isis_lsp *lsp;
 
-	struct isis_lsp *lsp;
 	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL1 - 1]); lsp; lsp = lspdb_next(&area->lspdb[ISIS_LEVEL1 - 1], lsp)) {
 		if (memcmp(lsp->hdr.lsp_id, sysid, ISIS_SYS_ID_LEN) == 0)
 			return true;
@@ -582,7 +581,6 @@ static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
 	 * IS neighbor NOT in the L1 LSDB (i.e., an Outside neighbor).
 	 */
 	{
-		struct isis_lsp *lsp;
 		struct isis_lsp *lsp;
 	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp; lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
 			if (isis_lsp_is_proxy_lsp(lsp))
