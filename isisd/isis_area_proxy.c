@@ -35,7 +35,7 @@
 	     __an && (area = listgetdata(__an), 1); \
 	     __an = __an->next)
 
-#define iso_address_list_first(al) ((al) && listhead(al))
+#define iso_address_list_first(al) ((al) && listhead(*(al)))
 
 void isis_area_proxy_enable(struct isis_area *area)
 {
@@ -755,7 +755,7 @@ bool isis_lsp_is_proxy_lsp(const struct isis_lsp *lsp)
 }
 
 /* ── 8.4 stub: Router Capability init not needed for core functionality ── */
-static void isis_tlvs_init_router_capability(struct isis_tlvs *tlvs)
+void isis_tlvs_init_router_capability(struct isis_tlvs *tlvs)
 {
 	/* Router Capability TLV aggregation (Step 4) skipped in 8.4 */
 	struct isis_router_cap *cap = &tlvs->router_cap;
