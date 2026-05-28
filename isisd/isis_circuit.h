@@ -179,6 +179,9 @@ struct isis_circuit {
 				    */
 	struct list *snmp_adj_list; /* List in id order */
 
+	/* ── RFC 9666 Area Proxy ── */
+	bool is_area_proxy_boundary;
+
 	QOBJ_FIELDS;
 };
 DECLARE_QOBJ_TYPE(isis_circuit);

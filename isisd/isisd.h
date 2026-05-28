@@ -245,6 +245,13 @@ struct isis_area {
 	uint64_t id_len_mismatches[2];
 	uint64_t lsp_error_counter[2];
 
+	/* ── RFC 9666 Area Proxy ── */
+	bool area_proxy_enabled;
+	uint8_t area_proxy_sysid[ISIS_SYS_ID_LEN];
+	uint32_t area_proxy_sid;
+	struct isis_lsp *proxy_lsp[ISIS_LEVELS];
+	struct thread *t_proxy_lsp_refresh;
+
 	QOBJ_FIELDS;
 };
 DECLARE_QOBJ_TYPE(isis_area);

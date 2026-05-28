@@ -48,7 +48,7 @@ int main(int argc, char **argv)
 {
 	pychar **wargv;
 
-#if PY_VERSION_HEX >= 0x03040000 /* 3.4 */
+#if PY_VERSION_HEX >= 0x03040000 && PY_VERSION_HEX < 0x030b0000 /* 3.4-3.10 */
 	Py_SetStandardStreamEncoding("UTF-8", NULL);
 #endif
 	wchar_t *name = wconv(argv[0]);

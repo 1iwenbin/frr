@@ -481,6 +481,7 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 			dst->srlb      = src->srlb;
 			memcpy(dst->algo, src->algo, sizeof(src->algo));
 			dst->msd       = src->msd;
+#if 0 /* FAD and SRv6 not available in FRR 8.4 */
 #ifndef FABRICD
 			/* Copy Flex-Algo definitions */
 			for (int i = 0; i < SR_ALGORITHM_COUNT; i++) {
@@ -494,6 +495,7 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 			/* Copy SRv6 capabilities */
 			dst->srv6_cap = src->srv6_cap;
 			dst->srv6_msd = src->srv6_msd;
+#endif /* FRR 8.4 */
 
 			zlog_debug("Area Proxy: aggregated Router Capability "
 				  "from LSP %pLS", lsp_rcap->hdr.lsp_id);
@@ -521,9 +523,9 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 /*
  * Timer callback for scheduled Proxy LSP regeneration.
  */
-static void isis_area_proxy_lsp_regenerate_timer(struct event *t)
+static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
 {
-	struct isis_area *area = EVENT_ARG(t);
+	struct isis_area *area = THREAD_ARG(t);
 
 	area->t_proxy_lsp_refresh = NULL;
 
@@ -714,7 +716,7 @@ void isis_area_proxy_lsp_regenerate_schedule(struct isis_area *area)
 
 	/* Schedule regeneration after a short delay (2 seconds)
 	 * to batch multiple L1 topology changes */
-	event_add_timer(master,
+	thread_add_timer(master,
 			isis_area_proxy_lsp_regenerate_timer,
 			area, 2, &area->t_proxy_lsp_refresh);
 
