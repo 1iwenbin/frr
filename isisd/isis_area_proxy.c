@@ -672,7 +672,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		struct isis_lsp *old = area->proxy_lsp[ISIS_LEVEL2 - 1];
 		new_seqno = old->hdr.seqno + 1;
 		lspdb_del(&area->lspdb[ISIS_LEVEL2 - 1], old);
-		lsp_free(old);
+		fabricd_lsp_free(old);
 		area->proxy_lsp[ISIS_LEVEL2 - 1] = NULL;
 
 		zlog_debug("Area Proxy: removed old Proxy LSP from LSDB");
@@ -740,4 +740,25 @@ void isis_area_proxy_lsp_regenerate_schedule(struct isis_area *area)
 
 	zlog_debug("Area Proxy: scheduled Proxy LSP regeneration for area %s",
 		   area->area_tag);
+}
+
+/* ── isis_lsp_is_proxy_lsp: 8.4 implementation (was in isis_lsp.c on 10.7) ── */
+bool isis_lsp_is_proxy_lsp(const struct isis_lsp *lsp)
+{
+	if (!lsp || !lsp->area)
+		return false;
+	if (!lsp->area->area_proxy_enabled)
+		return false;
+
+	return (memcmp(lsp->hdr.lsp_id, lsp->area->area_proxy_sysid,
+		       ISIS_SYS_ID_LEN) == 0);
+}
+
+/* ── 8.4 stub: Router Capability init not needed for core functionality ── */
+static void isis_tlvs_init_router_capability(struct isis_tlvs *tlvs)
+{
+	/* Router Capability TLV aggregation (Step 4) skipped in 8.4 */
+	struct isis_router_cap *cap = &tlvs->router_cap;
+	memset(cap, 0, sizeof(*cap));
+	cap->router_id.s_addr = INADDR_ANY;
 }
