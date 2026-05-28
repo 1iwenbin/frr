@@ -3085,6 +3085,107 @@ void cli_show_isis_mpls_if_ldp_sync_holddown(struct vty *vty,
 		yang_dnode_get_string(dnode, NULL));
 }
 
+/* ────────── RFC 9666 Area Proxy ────────── */
+
+DEFPY(area_proxy,
+      area_proxy_cmd,
+      "area-proxy",
+      "Enable IS-IS Area Proxy (RFC 9666)\n")
+{
+	VTY_DECLVAR_CONTEXT(isis_area, area);
+
+	if (!area)
+		return CMD_WARNING;
+	isis_area_proxy_enable(area);
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_area_proxy,
+      no_area_proxy_cmd,
+      "no area-proxy",
+      NO_STR
+      "Disable IS-IS Area Proxy (RFC 9666)\n")
+{
+	VTY_DECLVAR_CONTEXT(isis_area, area);
+
+	if (!area)
+		return CMD_WARNING;
+	isis_area_proxy_disable(area);
+	return CMD_SUCCESS;
+}
+
+DEFPY(area_proxy_sysid,
+      area_proxy_sysid_cmd,
+      "proxy-sysid WORD",
+      "Configure Proxy System ID for Area Proxy\n"
+      "Proxy System ID in XXXX.XXXX.XXXX format\n")
+{
+	VTY_DECLVAR_CONTEXT(isis_area, area);
+
+	if (!area)
+		return CMD_WARNING;
+	if (!area->area_proxy_enabled) {
+		vty_out(vty,
+			"%% Area Proxy is not enabled. Enable with 'area-proxy' first.\n");
+		return CMD_WARNING;
+	}
+	if (isis_area_proxy_set_sysid(area, proxy_sysid) != 0) {
+		vty_out(vty, "%% Failed to set Proxy System ID\n");
+		return CMD_WARNING;
+	}
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_area_proxy_sysid,
+      no_area_proxy_sysid_cmd,
+      "no proxy-sysid",
+      NO_STR
+      "Clear Proxy System ID for Area Proxy\n")
+{
+	VTY_DECLVAR_CONTEXT(isis_area, area);
+
+	if (!area)
+		return CMD_WARNING;
+	memset(area->area_proxy_sysid, 0, ISIS_SYS_ID_LEN);
+	return CMD_SUCCESS;
+}
+
+DEFPY(area_proxy_sid,
+      area_proxy_sid_cmd,
+      "area-sid (16-1048575)",
+      "Configure Area SID for Area Proxy\n"
+      "Area SID value (16-1048575)\n")
+{
+	VTY_DECLVAR_CONTEXT(isis_area, area);
+
+	if (!area)
+		return CMD_WARNING;
+	if (!area->area_proxy_enabled) {
+		vty_out(vty,
+			"%% Area Proxy is not enabled. Enable with 'area-proxy' first.\n");
+		return CMD_WARNING;
+	}
+	if (isis_area_proxy_set_sid(area, area_sid) != 0) {
+		vty_out(vty, "%% Failed to set Area SID\n");
+		return CMD_WARNING;
+	}
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_area_proxy_sid,
+      no_area_proxy_sid_cmd,
+      "no area-sid",
+      NO_STR
+      "Clear Area SID for Area Proxy\n")
+{
+	VTY_DECLVAR_CONTEXT(isis_area, area);
+
+	if (!area)
+		return CMD_WARNING;
+	isis_area_proxy_unset_sid(area);
+	return CMD_SUCCESS;
+}
+
 void isis_cli_init(void)
 {
 	install_element(CONFIG_NODE, &router_isis_cmd);
@@ -3228,6 +3329,14 @@ void isis_cli_init(void)
 	install_element(INTERFACE_NODE, &isis_mpls_if_ldp_sync_cmd);
 	install_element(INTERFACE_NODE, &isis_mpls_if_ldp_sync_holddown_cmd);
 	install_element(INTERFACE_NODE, &no_isis_mpls_if_ldp_sync_holddown_cmd);
+
+	/* RFC 9666 Area Proxy */
+	install_element(ISIS_NODE, &area_proxy_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_cmd);
+	install_element(ISIS_NODE, &area_proxy_sysid_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_sysid_cmd);
+	install_element(ISIS_NODE, &area_proxy_sid_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_sid_cmd);
 }
 
 #endif /* ifndef FABRICD */
