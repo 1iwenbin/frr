@@ -19,6 +19,24 @@
 #include "isisd/isis_mt.h"
 #include "isisd/isis_adjacency.h"
 
+/* 8.4 compatibility: frr_each → manual iteration macros */
+#define frr_each_circuit(list_ptr, circuit) \
+	for (struct listnode *__cn = (list_ptr)->head; \
+	     __cn && (circuit = listgetdata(__cn), 1); \
+	     __cn = __cn->next)
+
+#define frr_each_lspdb(head, lsp) \
+	for ((lsp) = lspdb_first(head); \
+	     (lsp); \
+	     (lsp) = lspdb_next(head, lsp))
+
+#define frr_each_area(area_list, area) \
+	for (struct listnode *__an = (area_list)->head; \
+	     __an && (area = listgetdata(__an), 1); \
+	     __an = __an->next)
+
+#define iso_address_list_first(al) ((al) && listhead(al))
+
 void isis_area_proxy_enable(struct isis_area *area)
 {
 	if (!area || area->area_proxy_enabled)

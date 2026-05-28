@@ -2896,9 +2896,11 @@ DEFUN(show_isis_area_proxy,
 
 	if (all_vrf) {
 		struct isis *isis;
-		frr_each (isis_instance_list, &im->isis, isis) {
+		struct listnode *anode;
+		for (ALL_LIST_ELEMENTS_RO(im->isis, anode, isis)) {
 			struct isis_area *area;
-			frr_each (isis_area_list, &isis->area_list, area)
+			struct listnode *a2node;
+			for (ALL_LIST_ELEMENTS_RO(isis->area_list, a2node, area))
 				isis_area_proxy_show(vty, area);
 		}
 		return CMD_SUCCESS;
@@ -2907,7 +2909,8 @@ DEFUN(show_isis_area_proxy,
 	struct isis *isis = isis_lookup_by_vrfname(vrf_name);
 	if (isis) {
 		struct isis_area *area;
-		frr_each (isis_area_list, &isis->area_list, area)
+		struct listnode *a3node;
+		for (ALL_LIST_ELEMENTS_RO(isis->area_list, a3node, area))
 			isis_area_proxy_show(vty, area);
 	} else {
 		vty_out(vty, "IS-IS instance not found for VRF %s\n",
