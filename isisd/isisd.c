@@ -339,6 +339,24 @@ struct isis_area *isis_area_create(const char *area_tag, const char *vrf_name)
 		thread_add_timer(master, lsp_tick, area, 1, &area->t_tick);
 	flags_initialize(&area->flags);
 
+	/* RFC 9666: Auto-enable Area Proxy from environment variables (NB-free).
+	 * OAEMU_PROXY_SYSID=FFFF.0000.0001  OAEMU_AREA_SID=16001
+	 * Set in docker-compose via gen-config.py per satellite node.
+	 * GW containers have no env vars → Area Proxy stays disabled.
+	 */
+	{
+		const char *proxy_sysid_env = getenv("OAEMU_PROXY_SYSID");
+		const char *area_sid_env = getenv("OAEMU_AREA_SID");
+
+		if (proxy_sysid_env && strlen(proxy_sysid_env) > 0) {
+			isis_area_proxy_enable(area);
+			isis_area_proxy_set_sysid(area, proxy_sysid_env);
+			if (area_sid_env)
+				isis_area_proxy_set_sid(area,
+					(uint32_t)strtoul(area_sid_env, NULL, 10));
+		}
+	}
+
 	isis_sr_area_init(area);
 
 	/*
