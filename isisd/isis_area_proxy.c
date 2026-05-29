@@ -33,17 +33,26 @@ void isis_area_proxy_enable(struct isis_area *area)
 		  area->area_tag, area->area_proxy_sysid);
 
 	/*
-	 * Phase 5: Scan existing circuits for boundary interfaces.
-	 * When a boundary circuit is found, isis_adjacency.c will
-	 * automatically re-filter all Inside LSPs from it.
+	 * Phase 5: Mark boundary circuits.  During startup there are no
+	 * adjacencies yet, so we rely on circuit type: L2-only circuits
+	 * on L1L2 routers are assumed to be cross-area boundaries.
+	 * The regeneration timer re-evaluates once L1 LSDB converges.
 	 */
 	{
 		struct isis_circuit *circuit;
 		struct listnode *cnode;
 	for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
+			/* L2-only circuits on L1L2-capable routers are boundaries */
+			if ((area->is_type & IS_LEVEL_1) &&
+			    circuit->is_type == IS_LEVEL_2) {
+				circuit->is_area_proxy_boundary = true;
+				zlog_info("Area Proxy: circuit %s marked as boundary (L2-only on L1L2 router)",
+					  circuit->interface->name);
+				continue;
+			}
+			/* Also check existing L2 adjacencies for Outside neighbors */
 			if ((circuit->is_type & IS_LEVEL_2) == 0)
 				continue;
-			/* Check L2 adjacencies for Outside neighbors */
 			struct listnode *node;
 			struct isis_adjacency *adj;
 			int lvl = ISIS_LEVEL2 - 1;
