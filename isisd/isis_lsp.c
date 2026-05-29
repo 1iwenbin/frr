@@ -2169,6 +2169,13 @@ void lsp_set_all_srmflags(struct isis_lsp *lsp, bool set)
 
 	struct list *circuit_list = lsp->area->circuit_list;
 	for (ALL_LIST_ELEMENTS_RO(circuit_list, node, circuit)) {
+		/* RFC 9666 Area Proxy: skip Inside L2 LSPs on boundary circuits */
+		if (set && circuit->is_area_proxy_boundary &&
+		    lsp->area->area_proxy_enabled &&
+		    !isis_lsp_is_proxy_lsp(lsp) &&
+		    lsp->level == ISIS_LEVEL2)
+			continue;
+
 		if (set) {
 			isis_tx_queue_add(circuit->tx_queue, lsp,
 					  TX_LSP_NORMAL);
