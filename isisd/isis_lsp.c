@@ -594,7 +594,7 @@ struct isis_lsp *lsp_new_from_recv(struct isis_lsp_hdr *hdr,
 	return lsp;
 }
 
-static void lsp_adjust_stream(struct isis_lsp *lsp)
+void lsp_adjust_stream(struct isis_lsp *lsp)
 {
 	if (lsp->pdu) {
 		if (STREAM_SIZE(lsp->pdu) == LLC_LEN + lsp->area->lsp_mtu)

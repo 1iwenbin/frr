@@ -762,8 +762,9 @@ void isis_tlvs_init_router_capability(struct isis_tlvs *tlvs)
 	cap->router_id.s_addr = INADDR_ANY;
 }
 
-/* ── 8.4: delegate to isis_lsp.c:lsp_pack_pdu() ── */
+/* ── 8.4: allocate stream then pack ── */
 void lsp_pack_pdu_ext(struct isis_lsp *lsp)
 {
+	lsp_adjust_stream(lsp);
 	lsp_pack_pdu(lsp);
 }
