@@ -298,7 +298,7 @@ static void lsp_add_auth(struct isis_lsp *lsp)
 	isis_tlvs_add_auth(lsp->tlvs, passwd);
 }
 
-static void lsp_pack_pdu(struct isis_lsp *lsp)
+void lsp_pack_pdu(struct isis_lsp *lsp)
 {
 	if (!lsp->tlvs)
 		lsp->tlvs = isis_alloc_tlvs();

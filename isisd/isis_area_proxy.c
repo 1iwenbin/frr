@@ -762,13 +762,8 @@ void isis_tlvs_init_router_capability(struct isis_tlvs *tlvs)
 	cap->router_id.s_addr = INADDR_ANY;
 }
 
-/* ── 8.4 stub: lsp_pack_pdu_ext (was in isis_lsp.c on 10.7) ── */
+/* ── 8.4: delegate to isis_lsp.c:lsp_pack_pdu() ── */
 void lsp_pack_pdu_ext(struct isis_lsp *lsp)
 {
-	/* LSP PDU packing handled by lsp_generate path in 8.4 */
-	if (!lsp)
-		return;
-	if (lsp->pdu)
-		stream_free(lsp->pdu);
-	lsp->pdu = NULL;
+	lsp_pack_pdu(lsp);
 }
