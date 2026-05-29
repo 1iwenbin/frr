@@ -3087,7 +3087,7 @@ void cli_show_isis_mpls_if_ldp_sync_holddown(struct vty *vty,
 
 /* ────────── RFC 9666 Area Proxy ────────── */
 
-DEFPY(area_proxy,
+DEFUN(area_proxy,
       area_proxy_cmd,
       "area-proxy",
       "Enable IS-IS Area Proxy (RFC 9666)\n")
@@ -3100,7 +3100,7 @@ DEFPY(area_proxy,
 	return CMD_SUCCESS;
 }
 
-DEFPY(no_area_proxy,
+DEFUN(no_area_proxy,
       no_area_proxy_cmd,
       "no area-proxy",
       NO_STR
@@ -3114,12 +3114,13 @@ DEFPY(no_area_proxy,
 	return CMD_SUCCESS;
 }
 
-DEFPY(area_proxy_sysid,
+DEFUN(area_proxy_sysid,
       area_proxy_sysid_cmd,
       "proxy-sysid WORD",
       "Configure Proxy System ID for Area Proxy\n"
       "Proxy System ID in XXXX.XXXX.XXXX format\n")
 {
+	int idx = 1;
 	VTY_DECLVAR_CONTEXT(isis_area, area);
 
 	if (!area)
@@ -3129,14 +3130,14 @@ DEFPY(area_proxy_sysid,
 			"%% Area Proxy is not enabled. Enable with 'area-proxy' first.\n");
 		return CMD_WARNING;
 	}
-	if (isis_area_proxy_set_sysid(area, proxy_sysid) != 0) {
+	if (isis_area_proxy_set_sysid(area, argv[idx]->arg) != 0) {
 		vty_out(vty, "%% Failed to set Proxy System ID\n");
 		return CMD_WARNING;
 	}
 	return CMD_SUCCESS;
 }
 
-DEFPY(no_area_proxy_sysid,
+DEFUN(no_area_proxy_sysid,
       no_area_proxy_sysid_cmd,
       "no proxy-sysid",
       NO_STR
@@ -3150,12 +3151,13 @@ DEFPY(no_area_proxy_sysid,
 	return CMD_SUCCESS;
 }
 
-DEFPY(area_proxy_sid,
+DEFUN(area_proxy_sid,
       area_proxy_sid_cmd,
       "area-sid (16-1048575)",
       "Configure Area SID for Area Proxy\n"
       "Area SID value (16-1048575)\n")
 {
+	int idx = 1;
 	VTY_DECLVAR_CONTEXT(isis_area, area);
 
 	if (!area)
@@ -3165,14 +3167,14 @@ DEFPY(area_proxy_sid,
 			"%% Area Proxy is not enabled. Enable with 'area-proxy' first.\n");
 		return CMD_WARNING;
 	}
-	if (isis_area_proxy_set_sid(area, area_sid) != 0) {
+	if (isis_area_proxy_set_sid(area, (uint32_t)strtoul(argv[idx]->arg, NULL, 10)) != 0) {
 		vty_out(vty, "%% Failed to set Area SID\n");
 		return CMD_WARNING;
 	}
 	return CMD_SUCCESS;
 }
 
-DEFPY(no_area_proxy_sid,
+DEFUN(no_area_proxy_sid,
       no_area_proxy_sid_cmd,
       "no area-sid",
       NO_STR
