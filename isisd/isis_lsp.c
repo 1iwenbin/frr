@@ -668,8 +668,11 @@ void lsp_insert(struct lspdb_head *head, struct isis_lsp *lsp)
 	if (lsp->area->area_proxy_enabled &&
 	    !isis_lsp_is_proxy_lsp(lsp) &&
 	    lsp->hdr.seqno != 0 &&
-	    lsp->hdr.rem_lifetime != 0)
-		isis_area_proxy_lsp_mark_dirty(lsp->area);
+	    lsp->hdr.rem_lifetime != 0) {
+		lsp->area->proxy_lsp_dirty = true;
+		isis_area_proxy_schedule_reconcile(lsp->area,
+						   AP_REASON_LSP_CHANGE);
+	}
 }
 
 /*

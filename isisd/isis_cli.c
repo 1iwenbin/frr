@@ -3243,7 +3243,7 @@ DEFUN(area_proxy_leader_election,
 	if (area->area_proxy_elect_check_sec == 0)
 		area->area_proxy_elect_check_sec = 30;
 	area->area_proxy_mode_set = true;
-	isis_area_proxy_lsp_regenerate_schedule(area);
+	isis_area_proxy_schedule_reconcile(area, AP_REASON_CONFIG_CHANGE);
 	return CMD_SUCCESS;
 }
 
@@ -3262,7 +3262,7 @@ DEFUN(no_area_proxy_leader_election,
 	area->area_proxy_leader_priority = 0;
 	area->area_proxy_elect_check_sec = 0;
 	area->area_proxy_mode_set = true;
-	isis_area_proxy_lsp_regenerate_schedule(area);
+	isis_area_proxy_schedule_reconcile(area, AP_REASON_CONFIG_CHANGE);
 	return CMD_SUCCESS;
 }
 

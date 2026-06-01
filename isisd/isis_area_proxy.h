@@ -25,14 +25,22 @@ extern int isis_area_proxy_unset_sid(struct isis_area *area);
 /* Aggregation and LSP generation */
 extern struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area);
 extern int isis_area_proxy_lsp_generate(struct isis_area *area);
-extern void isis_area_proxy_lsp_regenerate_schedule(struct isis_area *area);
-extern void isis_area_proxy_lsp_mark_dirty(struct isis_area *area);
-extern void isis_area_proxy_schedule_election(struct isis_area *area,
-					      const char *reason);
 
 /* Proxy LSP identification (declared in isis_lsp.h, implemented here) */
 extern bool isis_lsp_is_proxy_lsp(const struct isis_lsp *lsp);
 extern bool isis_area_proxy_lsp_is_inside_real(const struct isis_lsp *lsp);
+
+/* ── Reconciler: single-entry trigger model ── */
+enum area_proxy_reason {
+	AP_REASON_ADJ_CHANGE    = (1 << 0),  /* L1 adjacency UP/DOWN */
+	AP_REASON_LSP_CHANGE    = (1 << 1),  /* L1/L2 LSDB insert/update */
+	AP_REASON_CONFIG_CHANGE = (1 << 2),  /* CLI: mode/priority/sysid change */
+	AP_REASON_INITIAL       = (1 << 3),  /* area-proxy enable */
+	AP_REASON_PERIODIC      = (1 << 4),  /* periodic refresh timer */
+};
+
+extern void isis_area_proxy_schedule_reconcile(struct isis_area *area,
+					       uint32_t reason);
 
 /* Three-state LSP scope classification for flooding decisions */
 enum area_proxy_lsp_scope {

@@ -27,7 +27,7 @@
 static bool am_i_leader(struct isis_area *area);
 static bool isis_area_proxy_ready(struct isis_area *area);
 static void isis_area_proxy_lsp_purge(struct isis_area *area);
-static void isis_area_proxy_lsp_debounce_cb(struct thread *t);
+static void isis_area_proxy_reconcile_cb(struct thread *t);
 
 void isis_area_proxy_enable(struct isis_area *area)
 {
@@ -36,8 +36,10 @@ void isis_area_proxy_enable(struct isis_area *area)
 
 	area->area_proxy_enabled = true;
 	area->proxy_lsp_dirty = false;
-	area->proxy_lsp_settle_until = monotime(NULL) + 25;
-	THREAD_OFF(area->t_proxy_lsp_debounce);
+	area->ap_pending_reasons = 0;
+	area->ap_reconcile_running = false;
+	area->proxy_lsp_settle_until = monotime(NULL) + 35;
+	THREAD_OFF(area->t_area_proxy_reconcile);
 
 	zlog_info("Area Proxy: enabled on area %s (proxy-sysid: %pSY)",
 		  area->area_tag, area->area_proxy_sysid);
@@ -99,12 +101,9 @@ void isis_area_proxy_enable(struct isis_area *area)
 	 * when the first boundary circuit is detected.
 	 */
 
-	/* Only schedule timer if mode has been explicitly set.
-	 * Otherwise wait for leader-election / no leader-election command.
-	 * This prevents premature generation before proxy-sysid/area-sid
-	 * are fully configured. */
-	if (area->area_proxy_mode_set)
-		isis_area_proxy_lsp_regenerate_schedule(area);
+	/* Schedule initial reconcile — with startup settle window.
+	 * Reconciler defers all work until settle expires + jitter. */
+	isis_area_proxy_schedule_reconcile(area, AP_REASON_INITIAL);
 }
 
 void isis_area_proxy_disable(struct isis_area *area)
@@ -116,9 +115,9 @@ void isis_area_proxy_disable(struct isis_area *area)
 	memset(area->area_proxy_sysid, 0, ISIS_SYS_ID_LEN);
 	area->area_proxy_sid = 0;
 	area->proxy_lsp_dirty = false;
-	/* Cancel any pending debounce */
-	if (area->t_proxy_lsp_debounce)
-		THREAD_OFF(area->t_proxy_lsp_debounce);
+	area->ap_pending_reasons = 0;
+	/* Cancel any pending reconcile */
+	THREAD_OFF(area->t_area_proxy_reconcile);
 
 	zlog_info("Area Proxy: disabled on area %s", area->area_tag);
 
@@ -193,8 +192,6 @@ void isis_area_proxy_show(struct vty *vty, const struct isis_area *area)
 		}
 	}
 }
-
-/*
 
 /*
  * Show leader election details: all candidates from L2 LSDB,
@@ -590,8 +587,8 @@ int isis_area_proxy_set_sid(struct isis_area *area, uint32_t sid)
 	zlog_info("Area Proxy: set area-sid to %u on area %s",
 		  sid, area->area_tag);
 
-	/* Regenerate Proxy LSP with updated Area SID */
-	isis_area_proxy_lsp_generate(area);
+	/* Trigger reconcile to regenerate Proxy LSP */
+	isis_area_proxy_schedule_reconcile(area, AP_REASON_CONFIG_CHANGE);
 
 	return 0;
 }
@@ -1255,35 +1252,65 @@ static bool isis_area_proxy_ready(struct isis_area *area)
 }
 
 /* ────────────────────────────────────────────
- * Proxy LSP Generation
+ * Area Proxy Reconciler — single-entry state machine
+ *
+ * All triggers (adjacency change, LSP insert, config change) are
+ * funnelled into one reconciler per area.  The reconciler:
+ *   1. Defers during startup settle window (35s + jitter)
+ *   2. Serialises execution via ap_reconcile_running guard
+ *   3. Re-evaluates boundary circuits and edge-router cache
+ *   4. Runs leader election (if enabled) + ready check
+ *   5. Generates Proxy LSP transactionally (all-or-nothing)
+ *   6. Reschedules itself periodically
  * ──────────────────────────────────────────── */
 
-/*
- * Timer callback for scheduled Proxy LSP regeneration.
- */
-static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
+static void isis_area_proxy_reconcile_cb(struct thread *t)
 {
 	struct isis_area *area = THREAD_ARG(t);
+	uint32_t reasons;
+	bool is_leader, ready, was_leader;
+	uint32_t next_interval;
 
-	area->t_proxy_lsp_refresh = NULL;
+	area->t_area_proxy_reconcile = NULL;
 
-	/*
-	 * Re-evaluate boundary circuits: during startup, circuits may
-	 * not have existed when isis_area_proxy_enable() ran, and L2
-	 * adjacencies may come up before L1.  Now that the L1 LSDB has
-	 * had time to converge, fix both directions.
-	 */
+	/* ── 1. Startup settle: defer all actual work ── */
+	if (monotime(NULL) < area->proxy_lsp_settle_until) {
+		time_t remaining = area->proxy_lsp_settle_until - monotime(NULL);
+		uint32_t jitter = (uint32_t)(random() % 15);
+
+		if (remaining < 1)
+			remaining = 1;
+		zlog_debug("Area Proxy: reconcile deferred, settle %lds + %us jitter",
+			  (long)remaining, jitter);
+		thread_add_timer(master, isis_area_proxy_reconcile_cb,
+				area, remaining + jitter,
+				&area->t_area_proxy_reconcile);
+		return;
+	}
+
+	/* ── 2. Reentrancy guard ── */
+	if (area->ap_reconcile_running) {
+		area_proxy_debug("Area Proxy: reconcile reentry — skip");
+		return;
+	}
+	area->ap_reconcile_running = true;
+
+	/* ── 3. Snapshot + clear pending reasons ── */
+	reasons = area->ap_pending_reasons;
+	area->ap_pending_reasons = 0;
+
+	area_proxy_debug("Area Proxy: reconcile, reasons=0x%x dirty=%d",
+			reasons, area->proxy_lsp_dirty);
+
+	/* ── 4. Re-evaluate boundary circuits ── */
 	{
 		struct isis_circuit *circuit;
 		struct listnode *cnode;
 	for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
-			/* First: mark missed boundary circuits */
 			if (!circuit->is_area_proxy_boundary &&
 			    (area->is_type & IS_LEVEL_1) &&
 			    circuit->is_type == IS_LEVEL_2) {
 				circuit->is_area_proxy_boundary = true;
-				zlog_info("Area Proxy: circuit %s marked as boundary (L2-only on L1L2 router)",
-					  circuit->interface->name);
 				continue;
 			}
 			if (!circuit->is_area_proxy_boundary &&
@@ -1294,15 +1321,11 @@ static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
 				    && !isis_sysid_in_l1_lsdb(area,
 					    circuit->u.p2p.neighbor->sysid)) {
 					circuit->is_area_proxy_boundary = true;
-					zlog_info("Area Proxy: circuit %s marked as boundary",
-						  circuit->interface->name);
 					continue;
 				}
 			}
-			/* Then: unmark false positives */
 			if (!circuit->is_area_proxy_boundary)
 				continue;
-
 			bool has_l1 = false;
 			if (circuit->circ_type == CIRCUIT_T_BROADCAST) {
 				struct listnode *node;
@@ -1318,30 +1341,20 @@ static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
 				   && circuit->u.p2p.neighbor) {
 				has_l1 = (circuit->u.p2p.neighbor->level & ISIS_LEVEL1);
 			}
-			if (has_l1) {
+			if (has_l1)
 				circuit->is_area_proxy_boundary = false;
-				zlog_info("Area Proxy: circuit %s unmarked as boundary (has L1 neighbor)",
-					  circuit->interface->name);
-			}
 		}
 	}
 
-	/*
-	 * Cache edge-router flag on Inside L2 LSPs.
-	 * Rather than querying the L1 LSDB on every flood (which may
-	 * be empty at startup), we compute once after convergence and
-	 * store the result in lsp->is_edge_router.
-	 * An Inside LSP is an edge router iff it has at least one
-	 * IS neighbor NOT in the L1 LSDB (i.e., an Outside neighbor).
-	 */
+	/* ── 5. Cache edge-router flag on Inside L2 LSPs ── */
 	{
 		struct isis_lsp *lsp;
-	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp; lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
+	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp;
+	     lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
 			if (isis_lsp_is_proxy_lsp(lsp))
 				continue;
 			if (!isis_sysid_in_l1_lsdb(area, lsp->hdr.lsp_id))
 				continue;
-
 			lsp->is_edge_router = false;
 			if (lsp->tlvs) {
 				struct isis_extended_reach *reach;
@@ -1358,99 +1371,121 @@ static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
 		}
 	}
 
-	zlog_debug("Area Proxy: timer fired, area %s (leader_election=%d)",
-		   area->area_tag, area->area_proxy_leader_election);
-	area_proxy_debug("Area Proxy: timer fired, area %s, leader_election=%d",
-			 area->area_tag, area->area_proxy_leader_election);
-
-	/* ── Leader Election / Distributed generation ── */
+	/* ── 6. Leader election / Distributed generation ── */
 	if (area->area_proxy_leader_election) {
-		bool was_leader = (area->proxy_lsp[ISIS_LEVEL2 - 1] != NULL);
-		bool is_leader = am_i_leader(area);
+		was_leader = (area->proxy_lsp[ISIS_LEVEL2 - 1] != NULL);
+		is_leader = am_i_leader(area);
 
 		if (is_leader) {
 			if (!was_leader) {
-				zlog_info("Area Proxy: elected as LEADER (priority %u)",
+				zlog_info("Area Proxy: elected LEADER (priority %u)",
 					  area->area_proxy_leader_priority);
 				area->ap_leader_changes++;
 			}
 
-			/* Ready Check: all L1-reachable nodes have Area Proxy TLV? */
-			if (!isis_area_proxy_ready(area)) {
-				zlog_info("Area Proxy: not ready, deferring generation");
-				area_proxy_debug("Area Proxy: NOT READY — deferring generation");
+			ready = isis_area_proxy_ready(area);
+			if (!ready) {
 				if (area->area_proxy_ready_count > 0)
 					area->ap_ready_changes++;
 				area->area_proxy_ready_count = 0;
 			} else {
 				area->area_proxy_ready_count++;
-				/* Debounce: require 2 consecutive ready checks */
-				if (area->area_proxy_ready_count >= 2) {
+				if (area->area_proxy_ready_count >= 2 &&
+				    area->proxy_lsp_dirty) {
+					area_proxy_debug("Area Proxy: ready+dirty → generate");
 					isis_area_proxy_lsp_generate(area);
+					area->proxy_lsp_dirty = false;
 					area->area_proxy_last_gen_time = monotime(NULL);
 					area->area_proxy_ready_count = 0;
-				} else {
-					area_proxy_debug("Area Proxy: ready check %u/2 passed",
-							 area->area_proxy_ready_count);
 				}
 			}
 		} else {
 			area->area_proxy_ready_count = 0;
 			if (was_leader) {
 				zlog_info("Area Proxy: stepped down as LEADER");
-				area_proxy_debug("Area Proxy: stepped down as LEADER");
 				area->ap_leader_changes++;
-				/* P0: Do NOT purge the Proxy LSP on step-down.
-				 * The old Proxy remains in LSDB until the new
-				 * Leader overwrites it with a higher seqno, or
-				 * it expires naturally (holdtime ~1200s).
-				 * Immediate purge would withdraw the same
-				 * LSP ID and break the winner's copy too. */
 				area->area_proxy_last_gen_time = 0;
 			}
 		}
 	} else {
-		/* Distributed mode: always generate */
-		isis_area_proxy_lsp_generate(area);
-	}
-
-	/* ── On-demand regeneration: LSDB changed since last generation ── */
-	if (area->proxy_lsp_dirty) {
-		/* Still in startup settle window? Skip generation but keep dirty */
-		if (monotime(NULL) < area->proxy_lsp_settle_until) {
-			area_proxy_debug("Area Proxy: dirty during settle, deferred");
-			/* fall through to reschedule */
-		} else {
+		/* Distributed mode: generate if dirty */
+		if (area->proxy_lsp_dirty) {
+			isis_area_proxy_lsp_generate(area);
 			area->proxy_lsp_dirty = false;
-			THREAD_OFF(area->t_proxy_lsp_debounce);
-
-			bool is_leader = (area->area_proxy_leader_election)
-					 ? am_i_leader(area) : true;
-
-			if (is_leader && isis_area_proxy_ready(area)) {
-				area_proxy_debug("Area Proxy: dirty-flag triggered regeneration");
-				isis_area_proxy_lsp_generate(area);
-				area->area_proxy_last_gen_time = monotime(NULL);
-				area->area_proxy_ready_count = 0;
-			} else {
-				area->proxy_lsp_dirty = true;
-			}
+			area->area_proxy_last_gen_time = monotime(NULL);
 		}
 	}
 
-	/* Reschedule */
-	{
-		uint32_t reschedule_sec;
-		if (area->area_proxy_leader_election)
-			reschedule_sec = area->area_proxy_elect_check_sec ?
-					 area->area_proxy_elect_check_sec : 30;
-		else
-			reschedule_sec = area->lsp_refresh[ISIS_LEVEL2 - 1] ?
-					 area->lsp_refresh[ISIS_LEVEL2 - 1] : 900;
-		thread_add_timer(master, isis_area_proxy_lsp_regenerate_timer,
-				 area, reschedule_sec, &area->t_proxy_lsp_refresh);
+	area->ap_reconcile_running = false;
+
+	/* ── 7. If new reasons arrived during execution, reschedule fast ── */
+	if (area->ap_pending_reasons) {
+		uint32_t jitter = (uint32_t)(random() % 3);
+		thread_add_timer(master, isis_area_proxy_reconcile_cb,
+				area, 1 + jitter,
+				&area->t_area_proxy_reconcile);
+		return;
 	}
+
+	/* ── 8. Schedule next periodic round ── */
+	if (area->area_proxy_leader_election)
+		next_interval = area->area_proxy_elect_check_sec ?
+				area->area_proxy_elect_check_sec : 30;
+	else
+		next_interval = area->lsp_refresh[ISIS_LEVEL2 - 1] ?
+				area->lsp_refresh[ISIS_LEVEL2 - 1] : 900;
+
+	thread_add_timer(master, isis_area_proxy_reconcile_cb,
+			area, next_interval,
+			&area->t_area_proxy_reconcile);
 }
+
+/*
+ * Single entry point for all Area Proxy triggers.
+ *
+ * Sets the pending reason bitmask and schedules the reconciler.
+ * If reconcile is already running, just set the flag (the callback
+ * will pick it up at the end of the current cycle and reschedule).
+ * If a timer is already pending, the reasons accumulate.
+ */
+void isis_area_proxy_schedule_reconcile(struct isis_area *area, uint32_t reason)
+{
+	uint32_t delay;
+
+	if (!area || !area->area_proxy_enabled)
+		return;
+
+	area->ap_pending_reasons |= reason;
+
+	/* Reconcile running → flags accumulate, callback picks them up */
+	if (area->ap_reconcile_running)
+		return;
+
+	/* Timer already pending → reasons accumulate */
+	if (area->t_area_proxy_reconcile)
+		return;
+
+	/* Calculate delay based on trigger type */
+	if (monotime(NULL) < area->proxy_lsp_settle_until) {
+		time_t remaining = area->proxy_lsp_settle_until - monotime(NULL);
+		delay = (remaining > 0 ? (uint32_t)remaining : 1)
+			+ (uint32_t)(random() % 15);
+	} else if (reason & (AP_REASON_ADJ_CHANGE | AP_REASON_LSP_CHANGE)) {
+		delay = 3 + (uint32_t)(random() % 5);
+	} else if (reason & AP_REASON_INITIAL) {
+		delay = 5 + (uint32_t)(random() % 10);
+	} else {
+		delay = 2 + (uint32_t)(random() % 3);
+	}
+
+	thread_add_timer(master, isis_area_proxy_reconcile_cb,
+			area, delay, &area->t_area_proxy_reconcile);
+
+	area_proxy_debug("Area Proxy: reconcile scheduled, reason=0x%x delay=%us",
+			reason, delay);
+}
+
+/* ── isis_lsp_is_proxy_lsp: 8.4 implementation (was in isis_lsp.c on 10.7) ── */
 
 /*
  * Generate (or regenerate) the Proxy LSP from aggregated TLVs,
@@ -1475,13 +1510,12 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		return -1;
 
 	/* P0: reentrancy guard — prevent recursive generate from
-	 * dirty/debounce + periodic timer in same event cycle. */
-	if (area->proxy_lsp_generating) {
+	 * reconcile_cb re-entry. */
+	if (area->ap_reconcile_running) {
 		area_proxy_debug("Area Proxy: generate reentry — skip");
-		area->proxy_lsp_generating = false;
 		return 0;
 	}
-	area->proxy_lsp_generating = true;
+	area->ap_reconcile_running = true;
 
 	/* Ensure lsp_mtu is initialized before first Proxy LSP generation.
 	 * During config parsing, area->lsp_mtu may still be 0, causing
@@ -1500,7 +1534,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	if (sysid_zero) {
 		zlog_warn("Area Proxy: cannot generate Proxy LSP, "
 			  "proxy-sysid is not configured");
-		area->proxy_lsp_generating = false;
+		area->ap_reconcile_running = false;
 		return -1;
 	}
 
@@ -1508,7 +1542,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	tlvs = isis_area_proxy_aggregate_tlvs(area);
 	if (!tlvs) {
 		zlog_warn("Area Proxy: aggregation returned NULL TLVs");
-		area->proxy_lsp_generating = false;
+		area->ap_reconcile_running = false;
 		return -1;
 	}
 
@@ -1536,7 +1570,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		       0, NULL, ISIS_LEVEL2);
 	if (!lsp0) {
 		isis_free_tlvs(tlvs);
-		area->proxy_lsp_generating = false;
+		area->ap_reconcile_running = false;
 		return -1;
 	}
 	lsp0->own_lsp = 0;    /* proxy sysid != our own System ID */
@@ -1558,7 +1592,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	isis_free_tlvs(tlvs);
 	if (!fragments) {
 		zlog_warn("Area Proxy: isis_fragment_tlvs returned NULL");
-		area->proxy_lsp_generating = false;
+		area->ap_reconcile_running = false;
 		return -1;
 	}
 
@@ -1624,156 +1658,9 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		}
 	}
 
-	area->proxy_lsp_generating = false;
-
-	/* If mark_dirty was called during generate, schedule debounce */
-	if (area->proxy_lsp_dirty && !area->t_proxy_lsp_debounce) {
-		thread_add_timer(master, isis_area_proxy_lsp_debounce_cb,
-				 area, 3, &area->t_proxy_lsp_debounce);
-	}
+	area->ap_reconcile_running = false;
 
 	return 0;
-}
-
-/*
- * Mark Proxy LSP dirty and schedule a debounced regeneration.
- *
- * Called from LSDB update / adjacency change hooks.  Debounce (default
- * 3 s) avoids generating a new Proxy LSP for every single L1 LSDB
- * change during initial convergence.
- */
-void isis_area_proxy_lsp_mark_dirty(struct isis_area *area)
-{
-	if (!area || !area->area_proxy_enabled)
-		return;
-
-	area->proxy_lsp_dirty = true;
-
-	/* Startup settle window: defer all regenerate for first 25s
-	 * to let IS-IS adjacency/LSDB converge before Area Proxy
-	 * starts generating Proxy LSPs.  Dirty flag is still set so
-	 * that when settle expires, we regenerate immediately. */
-	if (monotime(NULL) < area->proxy_lsp_settle_until) {
-		area_proxy_debug("Area Proxy: dirty during settle, deferred");
-		return;
-	}
-
-	/* Do NOT schedule another debounce while a generate is in
-	 * progress — the generate completion will check the dirty flag
-	 * and reschedule if needed. */
-	if (area->proxy_lsp_generating) {
-		area_proxy_debug("Area Proxy: dirty during generate, deferred");
-		return;
-	}
-
-	/* If a debounce timer is already pending, leave it */
-	if (area->t_proxy_lsp_debounce)
-		return;
-
-	thread_add_timer(master, isis_area_proxy_lsp_debounce_cb,
-			 area, 3, &area->t_proxy_lsp_debounce);
-
-	area_proxy_debug("Area Proxy: marked dirty, debounce scheduled (3s)");
-}
-
-/*
- * Debounce callback: if we are the committed leader and ready,
- * regenerate the Proxy LSP.
- */
-static void isis_area_proxy_lsp_debounce_cb(struct thread *t)
-{
-	struct isis_area *area = THREAD_ARG(t);
-
-	area->t_proxy_lsp_debounce = NULL;
-	area->proxy_lsp_dirty = false;
-
-	if (!area->area_proxy_enabled)
-		return;
-
-	if (!area->area_proxy_leader_election) {
-		/* Distributed mode: always regenerate */
-		isis_area_proxy_lsp_generate(area);
-		return;
-	}
-
-	/* Leader-election mode: only the leader regenerates */
-	if (!am_i_leader(area)) {
-		area_proxy_debug("Area Proxy: debounce — not leader, skip regenerate");
-		return;
-	}
-
-	if (!isis_area_proxy_ready(area)) {
-		area_proxy_debug("Area Proxy: debounce — not ready, reschedule 5s");
-		/* Re-mark dirty and re-schedule debounce;
-		 * do NOT just set the flag and wait for external events:
-		 * during startup that may never come (all nodes already synced). */
-		area->proxy_lsp_dirty = true;
-		thread_add_timer(master, isis_area_proxy_lsp_debounce_cb,
-				 area, 5, &area->t_proxy_lsp_debounce);
-		return;
-	}
-
-	area_proxy_debug("Area Proxy: debounce — regenerating Proxy LSP (LSDB changed)");
-	isis_area_proxy_lsp_generate(area);
-	area->area_proxy_last_gen_time = monotime(NULL);
-}
-
-/*
- * Schedule a (delayed) regeneration of the Proxy LSP.
- * Should be called after L1 topology changes to batch updates.
- */
-void isis_area_proxy_lsp_regenerate_schedule(struct isis_area *area)
-{
-	uint32_t delay;
-
-	if (!area || !area->area_proxy_enabled)
-		return;
-
-	/* If a timer is already pending, leave it */
-	if (area->t_proxy_lsp_refresh)
-		return;
-
-	/* In leader election mode, use election check interval.
-	 * In distributed mode, use short delay to batch topology changes. */
-	if (area->area_proxy_leader_election)
-		delay = area->area_proxy_elect_check_sec ?
-			area->area_proxy_elect_check_sec : 30;
-	else
-		delay = 2;
-
-	thread_add_timer(master,
-			isis_area_proxy_lsp_regenerate_timer,
-			area, delay, &area->t_proxy_lsp_refresh);
-
-	zlog_debug("Area Proxy: scheduled Proxy LSP regeneration (delay=%us, mode=%s)",
-		   delay, area->area_proxy_leader_election ? "election" : "distributed");
-}
-
-/*
- * Event-driven election trigger. Called when L1 adjacency state changes
- * or L2 LSDB is updated. Schedules a shorter-timer re-evaluation so that
- * leader changes are detected promptly (not waiting for the next periodic
- * timer tick).
- */
-void isis_area_proxy_schedule_election(struct isis_area *area, const char *reason)
-{
-	if (!area || !area->area_proxy_enabled || !area->area_proxy_leader_election)
-		return;
-
-	area_proxy_debug("Area Proxy: election scheduled (reason: %s)", reason);
-
-	/* Cancel any existing timer so we can re-schedule immediately */
-	if (area->t_proxy_lsp_refresh)
-		THREAD_OFF(area->t_proxy_lsp_refresh);
-
-	/* Use half the normal interval for event-driven re-eval */
-	uint32_t delay = area->area_proxy_elect_check_sec ?
-			 area->area_proxy_elect_check_sec / 2 : 15;
-	if (delay < 5)
-		delay = 5;
-
-	thread_add_timer(master, isis_area_proxy_lsp_regenerate_timer,
-			 area, delay, &area->t_proxy_lsp_refresh);
 }
 
 /* ── isis_lsp_is_proxy_lsp: 8.4 implementation (was in isis_lsp.c on 10.7) ── */

@@ -250,11 +250,13 @@ struct isis_area {
 	uint8_t area_proxy_sysid[ISIS_SYS_ID_LEN];
 	uint32_t area_proxy_sid;
 	struct isis_lsp *proxy_lsp[ISIS_LEVELS];
-	struct thread *t_proxy_lsp_refresh;
-	struct thread *t_proxy_lsp_debounce;
-	bool proxy_lsp_dirty;
-	bool proxy_lsp_generating;             /* reentrancy guard */
-	time_t proxy_lsp_settle_until;         /* startup settle: defer regenerate */
+
+	/* ── Area Proxy reconciler (single-entry state machine) ── */
+	uint32_t ap_pending_reasons;           /* bitmask of enum area_proxy_reason */
+	bool ap_reconcile_running;             /* reentrancy guard for reconcile_cb */
+	struct thread *t_area_proxy_reconcile; /* single reconciler timer per area */
+	bool proxy_lsp_dirty;                  /* LSDB changed since last generate */
+	time_t proxy_lsp_settle_until;         /* startup settle: defer reconcile */
 
 	/* ── RFC 9667 Leader Election ── */
 	bool area_proxy_leader_election;       /* CLI: area-proxy leader-election */
