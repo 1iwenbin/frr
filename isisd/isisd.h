@@ -252,6 +252,20 @@ struct isis_area {
 	struct isis_lsp *proxy_lsp[ISIS_LEVELS];
 	struct thread *t_proxy_lsp_refresh;
 
+	/* ── RFC 9667 Leader Election ── */
+	bool area_proxy_leader_election;       /* CLI: area-proxy leader-election */
+	uint8_t area_proxy_leader_priority;    /* CLI: area-proxy priority (default 128) */
+	uint8_t area_proxy_elect_check_sec;    /* CLI: area-proxy elect-check-interval (default 30) */
+	time_t area_proxy_last_gen_time;       /* 上次生成 Proxy LSP 的时间戳 */
+	bool area_proxy_mode_set;              /* 模式是否已显式设置 */
+	uint8_t area_proxy_ready_count;        /* Ready Check 连续通过计数 */
+
+	/* Phase 9: Area Proxy counters */
+	uint64_t ap_lsp_gen_count;             /* Proxy LSP 生成次数 */
+	uint64_t ap_leader_changes;            /* Leader 切换次数 */
+	uint64_t ap_filtered_lsp_count;         /* 被泛洪过滤的 LSP 数量 */
+	uint64_t ap_ready_changes;             /* Ready 状态变化次数 */
+
 	QOBJ_FIELDS;
 };
 DECLARE_QOBJ_TYPE(isis_area);
@@ -346,6 +360,7 @@ extern unsigned long debug_sr;
 extern unsigned long debug_ldp_sync;
 extern unsigned long debug_lfa;
 extern unsigned long debug_te;
+extern unsigned long debug_area_proxy;
 
 #define DEBUG_ADJ_PACKETS                (1<<0)
 #define DEBUG_SNP_PACKETS                (1<<1)
@@ -363,6 +378,7 @@ extern unsigned long debug_te;
 #define DEBUG_LDP_SYNC                   (1<<13)
 #define DEBUG_LFA                        (1<<14)
 #define DEBUG_TE                         (1<<15)
+#define DEBUG_AREA_PROXY                 (1<<16)
 
 /* Debug related macro. */
 #define IS_DEBUG_ADJ_PACKETS (debug_adj_pkt & DEBUG_ADJ_PACKETS)
@@ -381,6 +397,7 @@ extern unsigned long debug_te;
 #define IS_DEBUG_LDP_SYNC (debug_ldp_sync & DEBUG_LDP_SYNC)
 #define IS_DEBUG_LFA (debug_lfa & DEBUG_LFA)
 #define IS_DEBUG_TE (debug_te & DEBUG_TE)
+#define IS_DEBUG_AREA_PROXY (debug_area_proxy & DEBUG_AREA_PROXY)
 
 #define lsp_debug(...)                                                         \
 	do {                                                                   \
@@ -403,6 +420,12 @@ extern unsigned long debug_te;
 #define te_debug(...)                                                          \
 	do {                                                                   \
 		if (IS_DEBUG_TE)                                               \
+			zlog_debug(__VA_ARGS__);                               \
+	} while (0)
+
+#define area_proxy_debug(...)                                                  \
+	do {                                                                   \
+		if (IS_DEBUG_AREA_PROXY)                                       \
 			zlog_debug(__VA_ARGS__);                               \
 	} while (0)
 

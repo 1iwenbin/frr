@@ -59,6 +59,7 @@
 #include "isisd/isis_tx_queue.h"
 #include "isisd/isis_pdu_counter.h"
 #include "isisd/isis_nb.h"
+#include "isisd/isis_area_proxy.h"
 
 static int ack_lsp(struct isis_lsp_hdr *hdr, struct isis_circuit *circuit,
 		   int level)
@@ -183,10 +184,12 @@ static int process_p2p_hello(struct iih_info *iih)
 	if (adj) {
 		if (memcmp(iih->sys_id, adj->sysid, ISIS_SYS_ID_LEN)) {
 			zlog_debug(
-				"hello source and adjacency do not match, set adj down");
+				"hello source and adjacency do not match, tear down old and create new");
 			isis_adj_state_change(&adj, ISIS_ADJ_DOWN,
-					      "adj do not exist");
-			return ISIS_OK;
+					      "sysid changed (e.g. proxy masquerading started)");
+			adj = NULL;
+			iih->circuit->u.p2p.neighbor = NULL;
+			/* Fall through to create new adjacency with new sysid */
 		}
 	}
 	if (!adj || adj->level != iih->circ_type) {
@@ -760,7 +763,11 @@ static int process_hello(uint8_t pdu_type, struct isis_circuit *circuit,
 		goto out;
 	}
 
-	if (!memcmp(iih.sys_id, circuit->isis->sysid, ISIS_SYS_ID_LEN)) {
+	if (!memcmp(iih.sys_id, circuit->isis->sysid, ISIS_SYS_ID_LEN)
+	    || (circuit->area->area_proxy_enabled
+		&& circuit->is_area_proxy_boundary
+		&& !memcmp(iih.sys_id, circuit->area->area_proxy_sysid,
+			   ISIS_SYS_ID_LEN))) {
 		zlog_warn(
 			"ISIS-Adj (%s): Received IIH with own sysid on %s - discard",
 			circuit->area->area_tag, circuit->interface->name);
@@ -1155,9 +1162,19 @@ dontcheckadj:
 							      circuit);
 				} /* 7.3.16.4 b) 3) */
 				else {
-					isis_tx_queue_add(circuit->tx_queue,
-							  lsp, TX_LSP_NORMAL);
-					ISIS_CLEAR_FLAG(lsp->SSNflags, circuit);
+					if (!isis_area_proxy_lsp_should_flood(
+						    lsp, circuit)) {
+						lsp->area
+							->ap_filtered_lsp_count++;
+						ISIS_SET_FLAG(lsp->SSNflags,
+							      circuit);
+					} else {
+						isis_tx_queue_add(
+							circuit->tx_queue, lsp,
+							TX_LSP_NORMAL);
+						ISIS_CLEAR_FLAG(
+							lsp->SSNflags, circuit);
+					}
 				}
 			} else if (lsp->hdr.rem_lifetime != 0) {
 				/* our own LSP -> 7.3.16.4 c) */
@@ -1176,9 +1193,19 @@ dontcheckadj:
 					lsp_flood_or_update(lsp, NULL,
 							    circuit_scoped);
 				} else {
-					isis_tx_queue_add(circuit->tx_queue,
-							  lsp, TX_LSP_NORMAL);
-					ISIS_CLEAR_FLAG(lsp->SSNflags, circuit);
+					if (!isis_area_proxy_lsp_should_flood(
+						    lsp, circuit)) {
+						lsp->area
+							->ap_filtered_lsp_count++;
+						ISIS_SET_FLAG(lsp->SSNflags,
+							      circuit);
+					} else {
+						isis_tx_queue_add(
+							circuit->tx_queue, lsp,
+							TX_LSP_NORMAL);
+						ISIS_CLEAR_FLAG(
+							lsp->SSNflags, circuit);
+					}
 				}
 				if (IS_DEBUG_UPDATE_PACKETS)
 					zlog_debug(
@@ -1878,8 +1905,22 @@ static void put_hello_hdr(struct isis_circuit *circuit, int level,
 	isis_circuit_stream(circuit, &circuit->snd_stream);
 	fill_fixed_hdr(pdu_type, circuit->snd_stream);
 
+	{
+		static int dbg_all = 0;
+		if (dbg_all++ < 10) {
+			FILE *f = fopen("/tmp/iih_all.log", "a");
+			if (f) {
+				fprintf(f, "put_hello: iface=%s level=%d boundary=%d enabled=%d\n",
+					circuit->interface->name, level,
+					circuit->is_area_proxy_boundary,
+					circuit->area ? circuit->area->area_proxy_enabled : 0);
+				fclose(f);
+			}
+		}
+	}
+
 	if (circuit->is_area_proxy_boundary && circuit->area &&
-	    circuit->area->area_proxy_enabled && level == ISIS_LEVEL2) {
+	    circuit->area->area_proxy_enabled) {
 		stream_putc(circuit->snd_stream, IS_LEVEL_2);
 		stream_put(circuit->snd_stream, circuit->area->area_proxy_sysid,
 			   ISIS_SYS_ID_LEN);
@@ -2162,7 +2203,14 @@ int send_csnp(struct isis_circuit *circuit, int level)
 	size_t len_pointer = stream_get_endp(circuit->snd_stream);
 
 	stream_putw(circuit->snd_stream, 0);
-	stream_put(circuit->snd_stream, circuit->isis->sysid, ISIS_SYS_ID_LEN);
+	/* RFC 9666 Phase 6B: use proxy-sysid as CSNP source on boundary circuits */
+	if (circuit->is_area_proxy_boundary && circuit->area &&
+	    circuit->area->area_proxy_enabled && level == ISIS_LEVEL2)
+		stream_put(circuit->snd_stream, circuit->area->area_proxy_sysid,
+			   ISIS_SYS_ID_LEN);
+	else
+		stream_put(circuit->snd_stream, circuit->isis->sysid,
+			   ISIS_SYS_ID_LEN);
 	/* with zero circuit id - ref 9.10, 9.11 */
 	stream_putc(circuit->snd_stream, 0);
 
@@ -2335,7 +2383,14 @@ static int send_psnp(int level, struct isis_circuit *circuit)
 
 	size_t len_pointer = stream_get_endp(circuit->snd_stream);
 	stream_putw(circuit->snd_stream, 0); /* length is filled in later */
-	stream_put(circuit->snd_stream, circuit->isis->sysid, ISIS_SYS_ID_LEN);
+	/* RFC 9666 Phase 6B: use proxy-sysid as PSNP source on boundary circuits */
+	if (circuit->is_area_proxy_boundary && circuit->area &&
+	    circuit->area->area_proxy_enabled && level == ISIS_LEVEL2)
+		stream_put(circuit->snd_stream, circuit->area->area_proxy_sysid,
+			   ISIS_SYS_ID_LEN);
+	else
+		stream_put(circuit->snd_stream, circuit->isis->sysid,
+			   ISIS_SYS_ID_LEN);
 	stream_putc(circuit->snd_stream, circuit->idx);
 
 	struct isis_passwd *passwd = (level == ISIS_LEVEL1)
@@ -2479,6 +2534,14 @@ void send_lsp(struct isis_circuit *circuit, struct isis_lsp *lsp,
 	 * Do not send if levels do not match
 	 */
 	if (!(lsp->level & circuit->is_type))
+		goto out;
+
+	/*
+	 * RFC 9666 Area Proxy: filter inside L2 LSPs from boundary circuits.
+	 * This is the final common path for all LSP transmission — catches
+	 * any bypass paths (PSNP, etc.) that might skip lsp_set_all_srmflags.
+	 */
+	if (!isis_area_proxy_lsp_should_flood(lsp, circuit))
 		goto out;
 
 	/*

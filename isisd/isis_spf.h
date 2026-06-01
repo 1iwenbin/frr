@@ -82,5 +82,8 @@ struct isis_spftree *isis_run_hopcount_spf(struct isis_area *area,
 					   uint8_t *sysid,
 					   struct isis_spftree *spftree);
 
+/* RFC 9666 Area Proxy: check if sysid is in L1 SPF reachable set */
+bool isis_spf_sysid_reachable(struct isis_area *area, const uint8_t *sysid);
+
 void isis_spf_timer_free(void *run);
 #endif /* _ZEBRA_ISIS_SPF_H */

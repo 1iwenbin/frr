@@ -46,6 +46,7 @@
 #include "isisd/isis_circuit.h"
 #include "isisd/isisd.h"
 #include "isisd/isis_lsp.h"
+#include "isisd/isis_area_proxy.h"
 #include "isisd/isis_pdu.h"
 #include "isisd/isis_dynhn.h"
 #include "isisd/isis_misc.h"
@@ -298,12 +299,15 @@ static void lsp_add_auth(struct isis_lsp *lsp)
 	isis_tlvs_add_auth(lsp->tlvs, passwd);
 }
 
-void lsp_pack_pdu(struct isis_lsp *lsp)
+static void lsp_adjust_stream(struct isis_lsp *lsp);
+
+void lsp_pack_pdu_ext(struct isis_lsp *lsp)
 {
 	if (!lsp->tlvs)
 		lsp->tlvs = isis_alloc_tlvs();
 
 	lsp_add_auth(lsp);
+	lsp_adjust_stream(lsp);
 
 	size_t len_pointer;
 	put_lsp_hdr(lsp, &len_pointer, false);
@@ -313,6 +317,11 @@ void lsp_pack_pdu(struct isis_lsp *lsp)
 	lsp->hdr.checksum =
 		ntohs(fletcher_checksum(STREAM_DATA(lsp->pdu) + 12,
 					stream_get_endp(lsp->pdu) - 12, 12));
+}
+
+static void lsp_pack_pdu(struct isis_lsp *lsp)
+{
+	lsp_pack_pdu_ext(lsp);
 }
 
 void lsp_inc_seqno(struct isis_lsp *lsp, uint32_t seqno)
@@ -594,7 +603,7 @@ struct isis_lsp *lsp_new_from_recv(struct isis_lsp_hdr *hdr,
 	return lsp;
 }
 
-void lsp_adjust_stream(struct isis_lsp *lsp)
+static void lsp_adjust_stream(struct isis_lsp *lsp)
 {
 	if (lsp->pdu) {
 		if (STREAM_SIZE(lsp->pdu) == LLC_LEN + lsp->area->lsp_mtu)
@@ -1092,6 +1101,14 @@ static void lsp_build(struct isis_lsp *lsp, struct isis_area *area)
 			cap.algo[0] = SR_ALGORITHM_UNSET;
 			cap.algo[1] = SR_ALGORITHM_UNSET;
 		}
+
+		/* RFC 9667: Area Leader priority.
+		 * Only include Area Proxy TLV if area-proxy is enabled.
+		 * priority is a subordinate attribute of enabled state.
+		 */
+		if (area->area_proxy_enabled &&
+		    area->area_proxy_leader_election)
+			cap.area_leader_priority = area->area_proxy_leader_priority;
 
 		isis_tlvs_set_router_capability(lsp->tlvs, &cap);
 		lsp_debug("ISIS (%s): Adding Router Capabilities information",
@@ -2169,12 +2186,29 @@ void lsp_set_all_srmflags(struct isis_lsp *lsp, bool set)
 
 	struct list *circuit_list = lsp->area->circuit_list;
 	for (ALL_LIST_ELEMENTS_RO(circuit_list, node, circuit)) {
-		/* RFC 9666 Area Proxy: skip Inside L2 LSPs on boundary circuits */
-		if (set && circuit->is_area_proxy_boundary &&
-		    lsp->area->area_proxy_enabled &&
-		    !isis_lsp_is_proxy_lsp(lsp) &&
-		    lsp->level == ISIS_LEVEL2)
-			continue;
+		/* RFC 9666 Area Proxy: classification-driven flooding filter.
+		 * L1 LSP:       flood only through inside (level-1-2) circuits.
+		 * inside real L2: flood only through inside circuits.
+		 * Proxy LSP:    flood through inside + outside circuits.
+		 * outside L2:   standard L2 flooding (no restriction).
+		 *
+		 * Boundary detection: use is_area_proxy_boundary flag
+		 * (set by timer) AND circuit is_type as fallback (works
+		 * immediately at startup before the timer fires). */
+		if (lsp->area->area_proxy_enabled && lsp->level == ISIS_LEVEL2) {
+			/* Proxy LSP — flood everywhere unconditionally */
+			if (isis_lsp_is_proxy_lsp(lsp))
+				goto do_flood;
+
+			if (!isis_area_proxy_lsp_should_flood(lsp, circuit)) {
+				if (set) {
+					lsp->area->ap_filtered_lsp_count++;
+					continue;
+				}
+			}
+		}
+
+	do_flood:
 
 		if (set) {
 			isis_tx_queue_add(circuit->tx_queue, lsp,

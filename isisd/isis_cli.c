@@ -36,6 +36,7 @@
 #include "isisd/isis_misc.h"
 #include "isisd/isis_circuit.h"
 #include "isisd/isis_csm.h"
+#include "isisd/isis_area_proxy.h"
 
 #ifndef VTYSH_EXTRACT_PL
 #include "isisd/isis_cli_clippy.c"
@@ -3087,12 +3088,43 @@ void cli_show_isis_mpls_if_ldp_sync_holddown(struct vty *vty,
 
 /* ────────── RFC 9666 Area Proxy ────────── */
 
+/*
+ * Get the isis_area pointer by parsing the XPath context.
+ * FRR 8.4 router isis uses VTY_PUSH_XPATH (not QOBJ),
+ * so VTY_DECLVAR_CONTEXT(isis_area) always returns NULL.
+ * We must parse the area-tag from the XPath and look it up.
+ */
+static struct isis_area *isis_cli_area_proxy_get_area(struct vty *vty)
+{
+	const char *xpath;
+	const char *p, *end;
+	char tag[256];
+	size_t len;
+
+	if (vty->xpath_index == 0)
+		return NULL;
+	xpath = vty->xpath[vty->xpath_index - 1];
+	p = strstr(xpath, "area-tag='");
+	if (!p)
+		return NULL;
+	p += 10; /* strlen("area-tag='") */
+	end = strchr(p, '\'');
+	if (!end)
+		return NULL;
+	len = end - p;
+	if (len >= sizeof(tag))
+		len = sizeof(tag) - 1;
+	memcpy(tag, p, len);
+	tag[len] = '\0';
+	return isis_area_lookup(tag, VRF_DEFAULT);
+}
+
 DEFUN(area_proxy,
       area_proxy_cmd,
       "area-proxy",
       "Enable IS-IS Area Proxy (RFC 9666)\n")
 {
-	VTY_DECLVAR_CONTEXT(isis_area, area);
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
 
 	if (!area)
 		return CMD_WARNING;
@@ -3106,7 +3138,7 @@ DEFUN(no_area_proxy,
       NO_STR
       "Disable IS-IS Area Proxy (RFC 9666)\n")
 {
-	VTY_DECLVAR_CONTEXT(isis_area, area);
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
 
 	if (!area)
 		return CMD_WARNING;
@@ -3121,7 +3153,7 @@ DEFUN(area_proxy_sysid,
       "Proxy System ID in XXXX.XXXX.XXXX format\n")
 {
 	int idx = 1;
-	VTY_DECLVAR_CONTEXT(isis_area, area);
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
 
 	if (!area)
 		return CMD_WARNING;
@@ -3143,7 +3175,7 @@ DEFUN(no_area_proxy_sysid,
       NO_STR
       "Clear Proxy System ID for Area Proxy\n")
 {
-	VTY_DECLVAR_CONTEXT(isis_area, area);
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
 
 	if (!area)
 		return CMD_WARNING;
@@ -3158,7 +3190,7 @@ DEFUN(area_proxy_sid,
       "Area SID value (16-1048575)\n")
 {
 	int idx = 1;
-	VTY_DECLVAR_CONTEXT(isis_area, area);
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
 
 	if (!area)
 		return CMD_WARNING;
@@ -3180,7 +3212,7 @@ DEFUN(no_area_proxy_sid,
       NO_STR
       "Clear Area SID for Area Proxy\n")
 {
-	VTY_DECLVAR_CONTEXT(isis_area, area);
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
 
 	if (!area)
 		return CMD_WARNING;
@@ -3188,8 +3220,131 @@ DEFUN(no_area_proxy_sid,
 	return CMD_SUCCESS;
 }
 
+/* ── RFC 9667 Leader Election ── */
+
+DEFUN(area_proxy_leader_election,
+      area_proxy_leader_election_cmd,
+      "area-proxy leader-election",
+      "IS-IS Area Proxy\n"
+      "Enable Area Leader Election (RFC 9667)\n")
+{
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
+
+	if (!area)
+		return CMD_WARNING;
+	if (!area->area_proxy_enabled) {
+		vty_out(vty,
+			"%% Area Proxy is not enabled. Enable with 'area-proxy' first.\n");
+		return CMD_WARNING;
+	}
+	area->area_proxy_leader_election = true;
+	if (area->area_proxy_leader_priority == 0)
+		area->area_proxy_leader_priority = 128;
+	if (area->area_proxy_elect_check_sec == 0)
+		area->area_proxy_elect_check_sec = 30;
+	area->area_proxy_mode_set = true;
+	isis_area_proxy_lsp_regenerate_schedule(area);
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_area_proxy_leader_election,
+      no_area_proxy_leader_election_cmd,
+      "no area-proxy leader-election",
+      NO_STR
+      "IS-IS Area Proxy\n"
+      "Disable Area Leader Election (use distributed mode)\n")
+{
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
+
+	if (!area)
+		return CMD_WARNING;
+	area->area_proxy_leader_election = false;
+	area->area_proxy_leader_priority = 0;
+	area->area_proxy_elect_check_sec = 0;
+	area->area_proxy_mode_set = true;
+	isis_area_proxy_lsp_regenerate_schedule(area);
+	return CMD_SUCCESS;
+}
+
+DEFUN(area_proxy_priority,
+      area_proxy_priority_cmd,
+      "area-proxy priority (0-255)",
+      "IS-IS Area Proxy\n"
+      "Set Area Leader election priority\n"
+      "Priority value (0=withdraw, higher wins)\n")
+{
+	int idx = 2;
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
+
+	if (!area)
+		return CMD_WARNING;
+	if (!area->area_proxy_leader_election) {
+		vty_out(vty,
+			"%% Leader election is not enabled. Enable with 'area-proxy leader-election' first.\n");
+		return CMD_WARNING;
+	}
+	area->area_proxy_leader_priority = (uint8_t)strtoul(argv[idx]->arg, NULL, 10);
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_area_proxy_priority,
+      no_area_proxy_priority_cmd,
+      "no area-proxy priority",
+      NO_STR
+      "IS-IS Area Proxy\n"
+      "Reset Area Leader priority to default (128)\n")
+{
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
+
+	if (!area)
+		return CMD_WARNING;
+	area->area_proxy_leader_priority = 128;
+	return CMD_SUCCESS;
+}
+
+DEFUN(area_proxy_elect_check_interval,
+      area_proxy_elect_check_interval_cmd,
+      "area-proxy elect-check-interval (5-3600)",
+      "IS-IS Area Proxy\n"
+      "Set election check interval in seconds\n"
+      "Interval in seconds (5-3600)\n")
+{
+	int idx = 2;
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
+
+	if (!area)
+		return CMD_WARNING;
+	if (!area->area_proxy_leader_election) {
+		vty_out(vty,
+			"%% Leader election is not enabled. Enable with 'area-proxy leader-election' first.\n");
+		return CMD_WARNING;
+	}
+	area->area_proxy_elect_check_sec = (uint32_t)strtoul(argv[idx]->arg, NULL, 10);
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_area_proxy_elect_check_interval,
+      no_area_proxy_elect_check_interval_cmd,
+      "no area-proxy elect-check-interval",
+      NO_STR
+      "IS-IS Area Proxy\n"
+      "Reset election check interval to default (30s)\n")
+{
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
+
+	if (!area)
+		return CMD_WARNING;
+	area->area_proxy_elect_check_sec = 30;
+	return CMD_SUCCESS;
+}
+
 void isis_cli_init(void)
 {
+	static bool done = false;
+	if (done)
+		return;
+	done = true;
+
 	install_element(CONFIG_NODE, &router_isis_cmd);
 	install_element(CONFIG_NODE, &no_router_isis_cmd);
 
@@ -3339,6 +3494,12 @@ void isis_cli_init(void)
 	install_element(ISIS_NODE, &no_area_proxy_sysid_cmd);
 	install_element(ISIS_NODE, &area_proxy_sid_cmd);
 	install_element(ISIS_NODE, &no_area_proxy_sid_cmd);
+	install_element(ISIS_NODE, &area_proxy_leader_election_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_leader_election_cmd);
+	install_element(ISIS_NODE, &area_proxy_priority_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_priority_cmd);
+	install_element(ISIS_NODE, &area_proxy_elect_check_interval_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_elect_check_interval_cmd);
 }
 
 #endif /* ifndef FABRICD */

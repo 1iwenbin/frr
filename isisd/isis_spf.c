@@ -384,6 +384,8 @@ struct isis_spftree *isis_spftree_new(struct isis_area *area,
 
 void isis_spftree_del(struct isis_spftree *spftree)
 {
+	if (!spftree)
+		return;
 	hash_clean(spftree->prefix_sids, NULL);
 	hash_free(spftree->prefix_sids);
 	isis_zebra_rlfa_unregister_all(spftree);
@@ -404,6 +406,33 @@ void isis_spftree_del(struct isis_spftree *spftree)
 
 	XFREE(MTYPE_ISIS_SPFTREE, spftree);
 	return;
+}
+
+/*
+ * Check if @sysid (6 bytes) is reachable in the L1 SPF tree.
+ * Iterates SPF tree vertices; returns true if any VTYPE_NONPSEUDO_IS
+ * vertex matches the sysid.
+ */
+bool isis_spf_sysid_reachable(struct isis_area *area, const uint8_t *sysid)
+{
+	struct isis_spftree *tree;
+	struct listnode *node;
+	struct isis_vertex *v;
+
+	if (!area || !sysid)
+		return false;
+
+	tree = area->spftree[SPFTREE_IPV4][ISIS_LEVEL1 - 1];
+	if (!tree)
+		return false;
+
+	for (ALL_QUEUE_ELEMENTS_RO(&tree->paths, node, v)) {
+		if ((v->type == VTYPE_NONPSEUDO_IS ||
+		     v->type == VTYPE_NONPSEUDO_TE_IS) &&
+		    memcmp(v->N.id, sysid, ISIS_SYS_ID_LEN) == 0)
+			return true;
+	}
+	return false;
 }
 
 static void isis_spftree_adj_del(struct isis_spftree *spftree,
@@ -1686,6 +1715,17 @@ static void isis_spf_loop(struct isis_spftree *spftree,
 						 sizeof(vertex->N.id)));
 			continue;
 		}
+
+		/* RFC 9666: skip own Area's Proxy LSP in inside SPF.
+		 * Inside routers must not use OWN Proxy LSP content for
+		 * local SPF computation.  Other Areas' Proxy LSPs MUST
+		 * be processed — they are the only source of cross-area
+		 * reachability (real L2 LSPs are blocked by flooding filter). */
+		if (lsp->area && lsp->area->area_proxy_enabled &&
+		    isis_lsp_is_proxy_lsp(lsp) &&
+		    memcmp(lsp->hdr.lsp_id, lsp->area->area_proxy_sysid,
+			   ISIS_SYS_ID_LEN) == 0)
+			continue;
 
 		isis_spf_process_lsp(spftree, lsp, vertex->d_N, vertex->depth,
 				     root_sysid, vertex);

@@ -3528,7 +3528,8 @@ static int pack_tlv_router_cap(const struct isis_router_cap *router_cap,
 	tlv_len += ISIS_SUBTLV_SID_LABEL_RANGE_SIZE
 		+ ISIS_SUBTLV_HDR_SIZE
 		+ ISIS_SUBTLV_ALGORITHM_SIZE
-		+ ISIS_SUBTLV_NODE_MSD_SIZE;
+		+ ISIS_SUBTLV_NODE_MSD_SIZE
+		+ ISIS_SUBTLV_AREA_LEADER_SIZE;
 
 	if (STREAM_WRITEABLE(s) < (unsigned int)(2 + tlv_len))
 		return 1;
@@ -3583,6 +3584,13 @@ static int pack_tlv_router_cap(const struct isis_router_cap *router_cap,
 			stream_putc(s, MSD_TYPE_BASE_MPLS_IMPOSITION);
 			stream_putc(s, router_cap->msd);
 		}
+	}
+
+	/* RFC 9667: Area Leader Sub-TLV (Type 27) */
+	if (router_cap->area_leader_priority > 0) {
+		stream_putc(s, ISIS_SUBTLV_AREA_LEADER);
+		stream_putc(s, 1); /* Length: 1 byte */
+		stream_putc(s, router_cap->area_leader_priority);
 	}
 
 	/* Adjust TLV length which depends on subTLVs presence */
@@ -3780,6 +3788,13 @@ static int unpack_tlv_router_cap(enum isis_tlv_context context,
 			/* Only one MSD is standardized. Skip others */
 			if (length > MSD_TLV_SIZE)
 				stream_forward_getp(s, length - MSD_TLV_SIZE);
+			break;
+		case ISIS_SUBTLV_AREA_LEADER:
+			/* RFC 9667: Area Leader Priority (1 byte) */
+			if (length >= 1)
+				rcap->area_leader_priority = stream_getc(s);
+			if (length > 1)
+				stream_forward_getp(s, length - 1);
 			break;
 		default:
 			stream_forward_getp(s, length);

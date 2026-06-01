@@ -83,6 +83,7 @@ unsigned long debug_sr;
 unsigned long debug_ldp_sync;
 unsigned long debug_lfa;
 unsigned long debug_te;
+unsigned long debug_area_proxy;
 
 DEFINE_MGROUP(ISISD, "isisd");
 
@@ -1654,6 +1655,8 @@ void print_debug(struct vty *vty, int flags, int onoff)
 		vty_out(vty,
 			"IS-IS Traffic Engineering events debugging is %s\n",
 			onoffs);
+	if (flags & DEBUG_AREA_PROXY)
+		vty_out(vty, "IS-IS Area Proxy debugging is %s\n", onoffs);
 	if (flags & DEBUG_LFA)
 		vty_out(vty, "IS-IS LFA events debugging is %s\n", onoffs);
 	if (flags & DEBUG_UPDATE_PACKETS)
@@ -1718,6 +1721,8 @@ DEFUN_NOSH (show_debugging,
 		print_debug(vty, DEBUG_LDP_SYNC, 1);
 	if (IS_DEBUG_LFA)
 		print_debug(vty, DEBUG_LFA, 1);
+	if (IS_DEBUG_AREA_PROXY)
+		print_debug(vty, DEBUG_AREA_PROXY, 1);
 
 	return CMD_SUCCESS;
 }
@@ -2228,6 +2233,24 @@ DEFUN(no_debug_isis_ldp_sync, no_debug_isis_ldp_sync_cmd,
 	debug_ldp_sync &= ~DEBUG_LDP_SYNC;
 	print_debug(vty, DEBUG_LDP_SYNC, 0);
 
+	return CMD_SUCCESS;
+}
+
+DEFUN(debug_isis_area_proxy, debug_isis_area_proxy_cmd,
+      "debug " PROTO_NAME " area-proxy",
+      DEBUG_STR PROTO_HELP "IS-IS Area Proxy events\n")
+{
+	debug_area_proxy |= DEBUG_AREA_PROXY;
+	print_debug(vty, DEBUG_AREA_PROXY, 1);
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_debug_isis_area_proxy, no_debug_isis_area_proxy_cmd,
+      "no debug " PROTO_NAME " area-proxy",
+      NO_STR UNDEBUG_STR PROTO_HELP "IS-IS Area Proxy events\n")
+{
+	debug_area_proxy &= ~DEBUG_AREA_PROXY;
+	print_debug(vty, DEBUG_AREA_PROXY, 0);
 	return CMD_SUCCESS;
 }
 
@@ -2894,6 +2917,39 @@ DEFUN(show_database, show_database_cmd,
 
 /* ────────── RFC 9666 Area Proxy ────────── */
 
+DEFUN(show_isis_area_proxy_election,
+      show_isis_area_proxy_election_cmd,
+      "show " PROTO_NAME " [vrf <NAME|all>] area-proxy election",
+      SHOW_STR PROTO_HELP VRF_CMD_HELP_STR
+      "All VRFs\n"
+      "Area Proxy (RFC 9666) information\n"
+      "Leader election details\n")
+{
+	const char *vrf_name = VRF_DEFAULT_NAME;
+	bool all_vrf = false;
+	int idx_vrf = 0;
+
+	ISIS_FIND_VRF_ARGS(argv, argc, idx_vrf, vrf_name, all_vrf);
+
+	if (!im) {
+		vty_out(vty, PROTO_NAME " is not running\n");
+		return CMD_SUCCESS;
+	}
+
+	struct isis *isis = isis_lookup_by_vrfname(vrf_name);
+	if (isis) {
+		struct isis_area *area;
+		struct listnode *a3node;
+		for (ALL_LIST_ELEMENTS_RO(isis->area_list, a3node, area))
+			isis_area_proxy_show_election(vty, area);
+	} else {
+		vty_out(vty, "IS-IS instance not found for VRF %s\n",
+			vrf_name);
+	}
+
+	return CMD_SUCCESS;
+}
+
 DEFUN(show_isis_area_proxy,
       show_isis_area_proxy_cmd,
       "show " PROTO_NAME " [vrf <NAME|all>] area-proxy",
@@ -2935,6 +2991,72 @@ DEFUN(show_isis_area_proxy,
 			vrf_name);
 	}
 
+	return CMD_SUCCESS;
+}
+
+static void show_ap_sub(struct vty *vty, struct isis *isis,
+			void (*fn)(struct vty *, struct isis_area *))
+{
+	struct isis_area *area;
+	struct listnode *anode;
+	for (ALL_LIST_ELEMENTS_RO(isis->area_list, anode, area))
+		fn(vty, area);
+}
+
+DEFUN(show_isis_area_proxy_ready,
+      show_isis_area_proxy_ready_cmd,
+      "show " PROTO_NAME " [vrf <NAME|all>] area-proxy ready",
+      SHOW_STR PROTO_HELP VRF_CMD_HELP_STR
+      "All VRFs\n"
+      "Area Proxy (RFC 9666) information\n"
+      "Ready check details\n")
+{
+	const char *vrf_name = VRF_DEFAULT_NAME;
+	bool all_vrf = false;
+	int idx_vrf = 0;
+	ISIS_FIND_VRF_ARGS(argv, argc, idx_vrf, vrf_name, all_vrf);
+	if (!im) { vty_out(vty, PROTO_NAME " is not running\n"); return CMD_SUCCESS; }
+	struct isis *isis = isis_lookup_by_vrfname(vrf_name);
+	if (isis) show_ap_sub(vty, isis, isis_area_proxy_show_ready);
+	else vty_out(vty, "IS-IS instance not found\n");
+	return CMD_SUCCESS;
+}
+
+DEFUN(show_isis_area_proxy_lsp,
+      show_isis_area_proxy_lsp_cmd,
+      "show " PROTO_NAME " [vrf <NAME|all>] area-proxy lsp",
+      SHOW_STR PROTO_HELP VRF_CMD_HELP_STR
+      "All VRFs\n"
+      "Area Proxy (RFC 9666) information\n"
+      "Proxy LSP details\n")
+{
+	const char *vrf_name = VRF_DEFAULT_NAME;
+	bool all_vrf = false;
+	int idx_vrf = 0;
+	ISIS_FIND_VRF_ARGS(argv, argc, idx_vrf, vrf_name, all_vrf);
+	if (!im) { vty_out(vty, PROTO_NAME " is not running\n"); return CMD_SUCCESS; }
+	struct isis *isis = isis_lookup_by_vrfname(vrf_name);
+	if (isis) show_ap_sub(vty, isis, isis_area_proxy_show_lsp);
+	else vty_out(vty, "IS-IS instance not found\n");
+	return CMD_SUCCESS;
+}
+
+DEFUN(show_isis_area_proxy_misconfig,
+      show_isis_area_proxy_misconfig_cmd,
+      "show " PROTO_NAME " [vrf <NAME|all>] area-proxy misconfig",
+      SHOW_STR PROTO_HELP VRF_CMD_HELP_STR
+      "All VRFs\n"
+      "Area Proxy (RFC 9666) information\n"
+      "Misconfiguration check\n")
+{
+	const char *vrf_name = VRF_DEFAULT_NAME;
+	bool all_vrf = false;
+	int idx_vrf = 0;
+	ISIS_FIND_VRF_ARGS(argv, argc, idx_vrf, vrf_name, all_vrf);
+	if (!im) { vty_out(vty, PROTO_NAME " is not running\n"); return CMD_SUCCESS; }
+	struct isis *isis = isis_lookup_by_vrfname(vrf_name);
+	if (isis) show_ap_sub(vty, isis, isis_area_proxy_show_misconfig);
+	else vty_out(vty, "IS-IS instance not found\n");
 	return CMD_SUCCESS;
 }
 
@@ -3687,6 +3809,10 @@ void isis_init(void)
 
 	install_element(VIEW_NODE, &show_hostname_cmd);
 	install_element(VIEW_NODE, &show_isis_area_proxy_cmd);
+	install_element(VIEW_NODE, &show_isis_area_proxy_election_cmd);
+	install_element(VIEW_NODE, &show_isis_area_proxy_ready_cmd);
+	install_element(VIEW_NODE, &show_isis_area_proxy_lsp_cmd);
+	install_element(VIEW_NODE, &show_isis_area_proxy_misconfig_cmd);
 	install_element(VIEW_NODE, &show_database_cmd);
 
 	install_element(ENABLE_NODE, &show_debugging_isis_cmd);
@@ -3725,6 +3851,8 @@ void isis_init(void)
 	install_element(ENABLE_NODE, &no_debug_isis_bfd_cmd);
 	install_element(ENABLE_NODE, &debug_isis_ldp_sync_cmd);
 	install_element(ENABLE_NODE, &no_debug_isis_ldp_sync_cmd);
+	install_element(ENABLE_NODE, &debug_isis_area_proxy_cmd);
+	install_element(ENABLE_NODE, &no_debug_isis_area_proxy_cmd);
 
 	install_element(CONFIG_NODE, &debug_isis_adj_cmd);
 	install_element(CONFIG_NODE, &no_debug_isis_adj_cmd);
@@ -3758,6 +3886,8 @@ void isis_init(void)
 	install_element(CONFIG_NODE, &no_debug_isis_bfd_cmd);
 	install_element(CONFIG_NODE, &debug_isis_ldp_sync_cmd);
 	install_element(CONFIG_NODE, &no_debug_isis_ldp_sync_cmd);
+	install_element(CONFIG_NODE, &debug_isis_area_proxy_cmd);
+	install_element(CONFIG_NODE, &no_debug_isis_area_proxy_cmd);
 
 	install_default(ROUTER_NODE);
 

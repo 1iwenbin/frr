@@ -210,6 +210,9 @@ struct isis_router_cap {
 	struct in_addr router_id;
 	uint8_t flags;
 
+	/* RFC 9667 Area Leader */
+	uint8_t area_leader_priority;
+
 	/* RFC 8667 section #3 */
 	struct isis_sr_block srgb;
 	struct isis_sr_block srlb;
@@ -410,6 +413,9 @@ enum isis_tlv_type {
 	ISIS_SUBTLV_AVA_BW = 38,
 	ISIS_SUBTLV_USE_BW = 39,
 
+	/* RFC 9667 */
+	ISIS_SUBTLV_AREA_LEADER = 27,
+
 	ISIS_SUBTLV_MAX = 40
 };
 
@@ -440,6 +446,7 @@ enum ext_subtlv_size {
 
 	ISIS_SUBTLV_HDR_SIZE = 2,
 	ISIS_SUBTLV_DEF_SIZE = 4,
+	ISIS_SUBTLV_AREA_LEADER_SIZE = 3,
 
 	ISIS_SUBTLV_MAX_SIZE = 180
 };
@@ -580,6 +587,8 @@ void isis_tlvs_set_dynamic_hostname(struct isis_tlvs *tlvs,
 				    const char *hostname);
 void isis_tlvs_set_router_capability(struct isis_tlvs *tlvs,
                      const struct isis_router_cap *cap);
+struct isis_router_cap *
+isis_tlvs_init_router_capability(struct isis_tlvs *tlvs);
 void isis_tlvs_set_te_router_id(struct isis_tlvs *tlvs,
 				const struct in_addr *id);
 void isis_tlvs_set_te_router_id_ipv6(struct isis_tlvs *tlvs,
