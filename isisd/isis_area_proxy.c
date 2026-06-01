@@ -1530,7 +1530,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		isis_free_tlvs(tlvs);
 		return -1;
 	}
-	lsp0->own_lsp = 0;
+	lsp0->own_lsp = 0;    /* proxy sysid != our own System ID */
 	/* lspu.frags already allocated by lsp_new() → lsp_link_fragment() */
 	area->proxy_lsp[ISIS_LEVEL2 - 1] = lsp0;
 
@@ -1571,7 +1571,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 				isis_free_tlvs(frag_tlvs);
 				continue;
 			}
-			frag->own_lsp = 0;
+			frag->own_lsp = 0;    /* proxy sysid != our own */
 		}
 
 		frag->tlvs = frag_tlvs;
