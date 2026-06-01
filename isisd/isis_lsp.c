@@ -660,7 +660,7 @@ void lsp_insert(struct lspdb_head *head, struct isis_lsp *lsp)
 	 * or boundary neighbors to the area proxy aggregation.
 	 * Mark the Proxy LSP dirty so it regenerates after debounce.
 	 *
-	 * Filter aggressively to reduce event storm during startup:
+	 * Filter to reduce event storm during startup:
 	 *   - Skip Proxy LSP itself (infinite loop guard)
 	 *   - Skip purged LSPs (seqno == 0)
 	 *   - Skip expired LSPs (rem_lifetime == 0)

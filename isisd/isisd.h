@@ -254,6 +254,7 @@ struct isis_area {
 	struct thread *t_proxy_lsp_debounce;
 	bool proxy_lsp_dirty;
 	bool proxy_lsp_generating;             /* reentrancy guard */
+	time_t proxy_lsp_settle_until;         /* startup settle: defer regenerate */
 
 	/* ── RFC 9667 Leader Election ── */
 	bool area_proxy_leader_election;       /* CLI: area-proxy leader-election */

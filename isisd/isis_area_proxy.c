@@ -36,6 +36,7 @@ void isis_area_proxy_enable(struct isis_area *area)
 
 	area->area_proxy_enabled = true;
 	area->proxy_lsp_dirty = false;
+	area->proxy_lsp_settle_until = monotime(NULL) + 25;
 	THREAD_OFF(area->t_proxy_lsp_debounce);
 
 	zlog_info("Area Proxy: enabled on area %s (proxy-sysid: %pSY)",
@@ -1415,22 +1416,25 @@ static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
 
 	/* ── On-demand regeneration: LSDB changed since last generation ── */
 	if (area->proxy_lsp_dirty) {
-		area->proxy_lsp_dirty = false;
-
-		/* Cancel any pending debounce — we are regenerating now */
-		THREAD_OFF(area->t_proxy_lsp_debounce);
-
-		bool is_leader = (area->area_proxy_leader_election)
-				 ? am_i_leader(area) : true;
-
-		if (is_leader && isis_area_proxy_ready(area)) {
-			area_proxy_debug("Area Proxy: dirty-flag triggered regeneration");
-			isis_area_proxy_lsp_generate(area);
-			area->area_proxy_last_gen_time = monotime(NULL);
-			area->area_proxy_ready_count = 0;
+		/* Still in startup settle window? Skip generation but keep dirty */
+		if (monotime(NULL) < area->proxy_lsp_settle_until) {
+			area_proxy_debug("Area Proxy: dirty during settle, deferred");
+			/* fall through to reschedule */
 		} else {
-			/* Not ready yet — re-mark dirty for next cycle */
-			area->proxy_lsp_dirty = true;
+			area->proxy_lsp_dirty = false;
+			THREAD_OFF(area->t_proxy_lsp_debounce);
+
+			bool is_leader = (area->area_proxy_leader_election)
+					 ? am_i_leader(area) : true;
+
+			if (is_leader && isis_area_proxy_ready(area)) {
+				area_proxy_debug("Area Proxy: dirty-flag triggered regeneration");
+				isis_area_proxy_lsp_generate(area);
+				area->area_proxy_last_gen_time = monotime(NULL);
+				area->area_proxy_ready_count = 0;
+			} else {
+				area->proxy_lsp_dirty = true;
+			}
 		}
 	}
 
@@ -1644,6 +1648,15 @@ void isis_area_proxy_lsp_mark_dirty(struct isis_area *area)
 		return;
 
 	area->proxy_lsp_dirty = true;
+
+	/* Startup settle window: defer all regenerate for first 25s
+	 * to let IS-IS adjacency/LSDB converge before Area Proxy
+	 * starts generating Proxy LSPs.  Dirty flag is still set so
+	 * that when settle expires, we regenerate immediately. */
+	if (monotime(NULL) < area->proxy_lsp_settle_until) {
+		area_proxy_debug("Area Proxy: dirty during settle, deferred");
+		return;
+	}
 
 	/* Do NOT schedule another debounce while a generate is in
 	 * progress — the generate completion will check the dirty flag
