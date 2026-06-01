@@ -212,6 +212,8 @@ struct isis_router_cap {
 
 	/* RFC 9667 Area Leader */
 	uint8_t area_leader_priority;
+	bool has_area_proxy_sysid;
+	uint8_t proxy_sysid[ISIS_SYS_ID_LEN];
 
 	/* RFC 8667 section #3 */
 	struct isis_sr_block srgb;
@@ -415,6 +417,8 @@ enum isis_tlv_type {
 
 	/* RFC 9667 */
 	ISIS_SUBTLV_AREA_LEADER = 27,
+	/* RFC 9667 Area Proxy System Identifier */
+	ISIS_SUBTLV_AREA_PROXY_SYSID = 28,
 
 	ISIS_SUBTLV_MAX = 40
 };
@@ -447,6 +451,7 @@ enum ext_subtlv_size {
 	ISIS_SUBTLV_HDR_SIZE = 2,
 	ISIS_SUBTLV_DEF_SIZE = 4,
 	ISIS_SUBTLV_AREA_LEADER_SIZE = 3,
+ISIS_SUBTLV_AREA_PROXY_SYSID_VALUE_SIZE = ISIS_SYS_ID_LEN,
 
 	ISIS_SUBTLV_MAX_SIZE = 180
 };

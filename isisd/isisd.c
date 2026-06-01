@@ -2930,6 +2930,7 @@ DEFUN(show_isis_area_proxy_election,
 	int idx_vrf = 0;
 
 	ISIS_FIND_VRF_ARGS(argv, argc, idx_vrf, vrf_name, all_vrf);
+	(void)all_vrf;
 
 	if (!im) {
 		vty_out(vty, PROTO_NAME " is not running\n");
@@ -3015,6 +3016,7 @@ DEFUN(show_isis_area_proxy_ready,
 	bool all_vrf = false;
 	int idx_vrf = 0;
 	ISIS_FIND_VRF_ARGS(argv, argc, idx_vrf, vrf_name, all_vrf);
+	(void)all_vrf;
 	if (!im) { vty_out(vty, PROTO_NAME " is not running\n"); return CMD_SUCCESS; }
 	struct isis *isis = isis_lookup_by_vrfname(vrf_name);
 	if (isis) show_ap_sub(vty, isis, isis_area_proxy_show_ready);
@@ -3034,6 +3036,7 @@ DEFUN(show_isis_area_proxy_lsp,
 	bool all_vrf = false;
 	int idx_vrf = 0;
 	ISIS_FIND_VRF_ARGS(argv, argc, idx_vrf, vrf_name, all_vrf);
+	(void)all_vrf;
 	if (!im) { vty_out(vty, PROTO_NAME " is not running\n"); return CMD_SUCCESS; }
 	struct isis *isis = isis_lookup_by_vrfname(vrf_name);
 	if (isis) show_ap_sub(vty, isis, isis_area_proxy_show_lsp);
@@ -3053,6 +3056,7 @@ DEFUN(show_isis_area_proxy_misconfig,
 	bool all_vrf = false;
 	int idx_vrf = 0;
 	ISIS_FIND_VRF_ARGS(argv, argc, idx_vrf, vrf_name, all_vrf);
+	(void)all_vrf;
 	if (!im) { vty_out(vty, PROTO_NAME " is not running\n"); return CMD_SUCCESS; }
 	struct isis *isis = isis_lookup_by_vrfname(vrf_name);
 	if (isis) show_ap_sub(vty, isis, isis_area_proxy_show_misconfig);

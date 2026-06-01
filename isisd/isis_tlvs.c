@@ -3593,6 +3593,13 @@ static int pack_tlv_router_cap(const struct isis_router_cap *router_cap,
 		stream_putc(s, router_cap->area_leader_priority);
 	}
 
+	/* RFC 9667: Area Proxy System Identifier Sub-TLV (Type 28) */
+	if (router_cap->has_area_proxy_sysid) {
+		stream_putc(s, ISIS_SUBTLV_AREA_PROXY_SYSID);
+		stream_putc(s, ISIS_SYS_ID_LEN); /* 6 bytes */
+		stream_write(s, router_cap->proxy_sysid, ISIS_SYS_ID_LEN);
+	}
+
 	/* Adjust TLV length which depends on subTLVs presence */
 	tlv_len = stream_get_endp(s) - len_pos - 1;
 	stream_putc_at(s, len_pos, tlv_len);
@@ -3795,6 +3802,16 @@ static int unpack_tlv_router_cap(enum isis_tlv_context context,
 				rcap->area_leader_priority = stream_getc(s);
 			if (length > 1)
 				stream_forward_getp(s, length - 1);
+			break;
+		case ISIS_SUBTLV_AREA_PROXY_SYSID:
+			/* RFC 9667: Area Proxy System Identifier (6 bytes) */
+			if (length == ISIS_SYS_ID_LEN) {
+				stream_get(rcap->proxy_sysid, s,
+					   ISIS_SYS_ID_LEN);
+				rcap->has_area_proxy_sysid = true;
+			}
+			if (length > ISIS_SYS_ID_LEN)
+				stream_forward_getp(s, length - ISIS_SYS_ID_LEN);
 			break;
 		default:
 			stream_forward_getp(s, length);

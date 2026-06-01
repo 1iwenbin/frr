@@ -26,6 +26,7 @@ extern int isis_area_proxy_unset_sid(struct isis_area *area);
 extern struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area);
 extern int isis_area_proxy_lsp_generate(struct isis_area *area);
 extern void isis_area_proxy_lsp_regenerate_schedule(struct isis_area *area);
+extern void isis_area_proxy_lsp_mark_dirty(struct isis_area *area);
 extern void isis_area_proxy_schedule_election(struct isis_area *area,
 					      const char *reason);
 

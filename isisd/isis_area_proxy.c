@@ -23,12 +23,20 @@
 /* 8.4 compatibility macros for deprecated 10.7 list APIs */
 #define iso_address_list_first(al) ((al) && listhead(*(al)))
 
+/* ── Forward declarations ── */
+static bool am_i_leader(struct isis_area *area);
+static bool isis_area_proxy_ready(struct isis_area *area);
+static void isis_area_proxy_lsp_purge(struct isis_area *area);
+static void isis_area_proxy_lsp_debounce_cb(struct thread *t);
+
 void isis_area_proxy_enable(struct isis_area *area)
 {
 	if (!area || area->area_proxy_enabled)
 		return;
 
 	area->area_proxy_enabled = true;
+	area->proxy_lsp_dirty = false;
+	THREAD_OFF(area->t_proxy_lsp_debounce);
 
 	zlog_info("Area Proxy: enabled on area %s (proxy-sysid: %pSY)",
 		  area->area_tag, area->area_proxy_sysid);
@@ -106,13 +114,17 @@ void isis_area_proxy_disable(struct isis_area *area)
 	area->area_proxy_enabled = false;
 	memset(area->area_proxy_sysid, 0, ISIS_SYS_ID_LEN);
 	area->area_proxy_sid = 0;
+	area->proxy_lsp_dirty = false;
+	/* Cancel any pending debounce */
+	if (area->t_proxy_lsp_debounce)
+		THREAD_OFF(area->t_proxy_lsp_debounce);
 
 	zlog_info("Area Proxy: disabled on area %s", area->area_tag);
 
 	/* Purge Proxy LSP if we are the leader */
 	if (area->proxy_lsp[ISIS_LEVEL2 - 1]) {
+		isis_area_proxy_lsp_purge(area);
 		lsp_regenerate_schedule(area, ISIS_LEVEL2, 0);
-		area->proxy_lsp[ISIS_LEVEL2 - 1] = NULL;
 	}
 
 	/* Regenerate L2 LSP to remove Area Proxy TLV */
@@ -489,6 +501,45 @@ void isis_area_proxy_show_misconfig(struct vty *vty, struct isis_area *area)
 				lsp->hdr.lsp_id[4], lsp->hdr.lsp_id[5]);
 			issues++;
 			break;
+		}
+	}
+
+	/* Check Proxy SysID consistency across Area nodes.
+	 * Each node with Area Proxy enabled advertises its proxy-sysid
+	 * in the Area Proxy System Identifier Sub-TLV (Type 28) within
+	 * Router Capability TLV (Type 242).  All nodes in the same
+	 * Area must use the same proxy-sysid. */
+	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp;
+	     lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
+		if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0)
+			continue;
+		if (isis_lsp_is_proxy_lsp(lsp))
+			continue; /* skip Proxy LSPs */
+		if (!memcmp(lsp->hdr.lsp_id, area->isis->sysid,
+			    ISIS_SYS_ID_LEN))
+			continue; /* skip self */
+		if (!lsp->tlvs || !lsp->tlvs->router_cap)
+			continue;
+		if (lsp->tlvs->router_cap->area_leader_priority == 0)
+			continue;
+
+		if (!lsp->tlvs->router_cap->has_area_proxy_sysid) {
+			vty_out(vty, "  ⚠  Proxy SysID unknown (old format): %pSY (upgrade needed)\n",
+				lsp->hdr.lsp_id);
+			issues++;
+		} else if (memcmp(lsp->tlvs->router_cap->proxy_sysid,
+				  area->area_proxy_sysid,
+				  ISIS_SYS_ID_LEN) != 0) {
+			vty_out(vty, "  ⚠  Proxy SysID mismatch: %pSY advertises %02x%02x.%02x%02x.%02x%02x (local expects %pSY)\n",
+				lsp->hdr.lsp_id,
+				lsp->tlvs->router_cap->proxy_sysid[0],
+				lsp->tlvs->router_cap->proxy_sysid[1],
+				lsp->tlvs->router_cap->proxy_sysid[2],
+				lsp->tlvs->router_cap->proxy_sysid[3],
+				lsp->tlvs->router_cap->proxy_sysid[4],
+				lsp->tlvs->router_cap->proxy_sysid[5],
+				area->area_proxy_sysid);
+			issues++;
 		}
 	}
 
@@ -1120,18 +1171,36 @@ static bool am_i_leader(struct isis_area *area)
 }
 
 /*
- * Purge our Proxy LSP (called when stepping down as leader).
+ * Purge our Proxy LSP and all its fragments (called from admin disable).
  */
 static void isis_area_proxy_lsp_purge(struct isis_area *area)
 {
+	struct isis_lsp *lsp0;
+
 	if (!area->proxy_lsp[ISIS_LEVEL2 - 1])
 		return;
-	struct isis_lsp *old = area->proxy_lsp[ISIS_LEVEL2 - 1];
-	zlog_info("Area Proxy: purging Proxy LSP (stepping down)");
-	old->hdr.rem_lifetime = 0;
-	lsp_flood(old, NULL);
+	lsp0 = area->proxy_lsp[ISIS_LEVEL2 - 1];
+
+	zlog_info("Area Proxy: purging Proxy LSP (admin disable)");
+
+	/* Purge all fragments first */
+	if (lsp0->lspu.frags) {
+		struct listnode *node;
+		struct isis_lsp *frag;
+		for (ALL_LIST_ELEMENTS_RO(lsp0->lspu.frags, node, frag)) {
+			frag->hdr.rem_lifetime = 0;
+			lsp_flood(frag, NULL);
+			lsp_search_and_destroy(&area->lspdb[ISIS_LEVEL2 - 1],
+					       frag->hdr.lsp_id);
+		}
+		list_delete_all_node(lsp0->lspu.frags);
+	}
+
+	/* Purge fragment 0 */
+	lsp0->hdr.rem_lifetime = 0;
+	lsp_flood(lsp0, NULL);
 	lsp_search_and_destroy(&area->lspdb[ISIS_LEVEL2 - 1],
-			       old->hdr.lsp_id);
+			       lsp0->hdr.lsp_id);
 	area->proxy_lsp[ISIS_LEVEL2 - 1] = NULL;
 }
 
@@ -1330,13 +1399,39 @@ static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
 				zlog_info("Area Proxy: stepped down as LEADER");
 				area_proxy_debug("Area Proxy: stepped down as LEADER");
 				area->ap_leader_changes++;
-				isis_area_proxy_lsp_purge(area);
+				/* P0: Do NOT purge the Proxy LSP on step-down.
+				 * The old Proxy remains in LSDB until the new
+				 * Leader overwrites it with a higher seqno, or
+				 * it expires naturally (holdtime ~1200s).
+				 * Immediate purge would withdraw the same
+				 * LSP ID and break the winner's copy too. */
 				area->area_proxy_last_gen_time = 0;
 			}
 		}
 	} else {
 		/* Distributed mode: always generate */
 		isis_area_proxy_lsp_generate(area);
+	}
+
+	/* ── On-demand regeneration: LSDB changed since last generation ── */
+	if (area->proxy_lsp_dirty) {
+		area->proxy_lsp_dirty = false;
+
+		/* Cancel any pending debounce — we are regenerating now */
+		THREAD_OFF(area->t_proxy_lsp_debounce);
+
+		bool is_leader = (area->area_proxy_leader_election)
+				 ? am_i_leader(area) : true;
+
+		if (is_leader && isis_area_proxy_ready(area)) {
+			area_proxy_debug("Area Proxy: dirty-flag triggered regeneration");
+			isis_area_proxy_lsp_generate(area);
+			area->area_proxy_last_gen_time = monotime(NULL);
+			area->area_proxy_ready_count = 0;
+		} else {
+			/* Not ready yet — re-mark dirty for next cycle */
+			area->proxy_lsp_dirty = true;
+		}
 	}
 
 	/* Reschedule */
@@ -1356,12 +1451,21 @@ static void isis_area_proxy_lsp_regenerate_timer(struct thread *t)
 /*
  * Generate (or regenerate) the Proxy LSP from aggregated TLVs,
  * then flood it to all L2 neighbors.
+ *
+ * Supports fragmentation: if aggregated TLVs exceed lsp_mtu,
+ * additional fragments (00-01, 00-02, ...) are created and
+ * linked via lspu.frags chain.
  */
 int isis_area_proxy_lsp_generate(struct isis_area *area)
 {
-	struct isis_lsp *lsp;
+	struct isis_lsp *lsp0;
 	struct isis_tlvs *tlvs;
 	uint8_t lsp_id[ISIS_SYS_ID_LEN + 2];
+	struct list *fragments;
+	struct listnode *node;
+	struct isis_tlvs *frag_tlvs;
+	uint32_t new_seqno = 1;
+	int frag_count = 0;
 
 	if (!area || !area->area_proxy_enabled)
 		return -1;
@@ -1393,67 +1497,188 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		return -1;
 	}
 
-	/* Build LSP ID: proxy_sysid + pseudo_id=0 + frag_id=0 */
+	/* Build LSP ID: proxy_sysid + pseudo_id=0 */
 	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
-	lsp_id[ISIS_SYS_ID_LEN] = 0;     /* pseudo ID */
-	lsp_id[ISIS_SYS_ID_LEN + 1] = 0; /* fragment ID */
+	lsp_id[ISIS_SYS_ID_LEN] = 0; /* pseudo ID */
 
-	/* Remove old Proxy LSP from LSDB if it exists, remembering
-	 * its seqno so we can increment (normal LSPs auto-increment). */
-	uint32_t new_seqno = 1;
-	if (area->proxy_lsp[ISIS_LEVEL2 - 1]) {
-		struct isis_lsp *old = area->proxy_lsp[ISIS_LEVEL2 - 1];
-		new_seqno = old->hdr.seqno + 1;
+	/* --- Fragment 0: create or find --- */
+	lsp0 = area->proxy_lsp[ISIS_LEVEL2 - 1];
+	if (lsp0) {
+		new_seqno = lsp0->hdr.seqno + 1;
+		/* Remove ALL old fragments from LSDB before re-creating */
+		if (lsp0->lspu.frags) {
+			struct listnode *fn;
+			struct isis_lsp *frag;
+			for (ALL_LIST_ELEMENTS_RO(lsp0->lspu.frags,
+						  fn, frag)) {
+				lsp_search_and_destroy(
+					&area->lspdb[ISIS_LEVEL2 - 1],
+					frag->hdr.lsp_id);
+			}
+			list_delete_all_node(lsp0->lspu.frags);
+		}
 		lsp_search_and_destroy(&area->lspdb[ISIS_LEVEL2 - 1],
-				       old->hdr.lsp_id);
+				       lsp0->hdr.lsp_id);
 		area->proxy_lsp[ISIS_LEVEL2 - 1] = NULL;
-
-		zlog_debug("Area Proxy: removed old Proxy LSP from LSDB");
 	}
-
-	/* Create new Proxy LSP */
-	lsp = lsp_new(area, lsp_id,
-		      area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
-		      new_seqno,          /* increment seqno on re-gen */
-		      IS_LEVEL_1_AND_2,  /* lsp_bits: L1L2-capable */
-		      0,                 /* checksum (computed later) */
-		      NULL,              /* lsp0 */
-		      ISIS_LEVEL2);
-	if (!lsp) {
+	lsp0 = lsp_new(area, lsp_id,
+		       area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
+		       new_seqno,
+		       IS_LEVEL_1_AND_2,
+		       0, NULL, ISIS_LEVEL2);
+	if (!lsp0) {
 		isis_free_tlvs(tlvs);
 		return -1;
 	}
+	lsp0->own_lsp = 0;
+	lsp0->lspu.frags = list_new();
+	area->proxy_lsp[ISIS_LEVEL2 - 1] = lsp0;
 
-	lsp->tlvs = tlvs;
-	lsp->own_lsp = 0; /* not "our own" LSP */
-	area->proxy_lsp[ISIS_LEVEL2 - 1] = lsp;
+	/* --- Calculate available TLV space --- */
+	{
+		/* Use isis_pack_tlvs with a dummy stream to let
+		 * isis_fragment_tlvs handle space calculation internally.
+		 * We don't need to pre-calculate tlv_space ourselves —
+		 * isis_fragment_tlvs accepts the LSP MTU directly. */
+		size_t tlv_space = area->lsp_mtu - LLC_LEN
+				   - 12 /* IS-IS hdr before TLVs */;
 
-	/* Build the PDU from our aggregated TLVs BEFORE inserting into LSDB.
-	 * Use lsp_pack_pdu_ext — the exact same code path that normal LSPs
-	 * use, which is known to produce correct checksums. */
-	lsp_pack_pdu_ext(lsp);
+		/* --- Fragment TLVs --- */
+		fragments = isis_fragment_tlvs(tlvs, tlv_space);
+	}
+	isis_free_tlvs(tlvs);
+	if (!fragments) {
+		zlog_warn("Area Proxy: isis_fragment_tlvs returned NULL");
+		return -1;
+	}
 
-	/* Insert into L2 LSDB */
-	lsp_insert(&area->lspdb[ISIS_LEVEL2 - 1], lsp);
+	/* --- Assign fragmented TLVs to LSPs, link via lspu.frags --- */
+	for (ALL_LIST_ELEMENTS_RO(fragments, node, frag_tlvs)) {
+		struct isis_lsp *frag;
+		if (frag_count == 0) {
+			/* fragment 0 */
+			frag = lsp0;
+		} else {
+			lsp_id[ISIS_SYS_ID_LEN + 1] = frag_count;
+			frag = lsp_new(area, lsp_id,
+				       area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
+				       new_seqno,
+				       IS_LEVEL_1_AND_2,
+				       0, NULL, ISIS_LEVEL2);
+			if (!frag) {
+				isis_free_tlvs(frag_tlvs);
+				continue;
+			}
+			frag->own_lsp = 0;
+		}
 
-	zlog_info("Area Proxy: generated/regenerated Proxy LSP %pLS, pdu_len=%u",
-		  lsp_id, lsp->hdr.pdu_len);
-	area_proxy_debug("Area Proxy: Proxy LSP generated, pdu_len=%u seqno=0x%08x",
-			 lsp->hdr.pdu_len, lsp->hdr.seqno);
+		frag->tlvs = frag_tlvs;
+
+		/* Use the standard PDU packer which writes IS-IS headers
+		 * before TLVs and computes the correct checksum. */
+		lsp_pack_pdu_ext(frag);
+
+		/* Insert into LSDB */
+		lsp_insert(&area->lspdb[ISIS_LEVEL2 - 1], frag);
+
+		/* Link non-0 fragments to fragment 0 */
+		if (frag_count > 0)
+			listnode_add(lsp0->lspu.frags, frag);
+
+		frag_count++;
+
+		zlog_debug("Area Proxy: Proxy LSP fragment %d pdu_len=%u seqno=0x%08x",
+			   frag_count - 1, frag->hdr.pdu_len, frag->hdr.seqno);
+	}
+
+	list_delete(&fragments);
+
+	zlog_info("Area Proxy: generated Proxy LSP %pLS, %d fragments",
+		  lsp_id, frag_count);
 	area->ap_lsp_gen_count++;
 
-	/* Flood to all L2 circuits */
+	/* Flood all fragments to L2 circuits */
 	{
 		struct isis_circuit *circuit;
 		struct listnode *cnode;
-	for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
+		struct listnode *lnode;
+		struct isis_lsp *flsp;
+
+		for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
 			if (circuit->is_passive)
 				continue;
-			lsp_flood(lsp, circuit);
+			lsp_flood(lsp0, circuit);
+			if (lsp0->lspu.frags) {
+				for (ALL_LIST_ELEMENTS_RO(lsp0->lspu.frags,
+							  lnode, flsp))
+					lsp_flood(flsp, circuit);
+			}
 		}
 	}
 
 	return 0;
+}
+
+/*
+ * Mark Proxy LSP dirty and schedule a debounced regeneration.
+ *
+ * Called from LSDB update / adjacency change hooks.  Debounce (default
+ * 3 s) avoids generating a new Proxy LSP for every single L1 LSDB
+ * change during initial convergence.
+ */
+void isis_area_proxy_lsp_mark_dirty(struct isis_area *area)
+{
+	if (!area || !area->area_proxy_enabled)
+		return;
+
+	area->proxy_lsp_dirty = true;
+
+	/* If a debounce timer is already pending, leave it */
+	if (area->t_proxy_lsp_debounce)
+		return;
+
+	thread_add_timer(master, isis_area_proxy_lsp_debounce_cb,
+			 area, 3, &area->t_proxy_lsp_debounce);
+
+	area_proxy_debug("Area Proxy: marked dirty, debounce scheduled (3s)");
+}
+
+/*
+ * Debounce callback: if we are the committed leader and ready,
+ * regenerate the Proxy LSP.
+ */
+static void isis_area_proxy_lsp_debounce_cb(struct thread *t)
+{
+	struct isis_area *area = THREAD_ARG(t);
+
+	area->t_proxy_lsp_debounce = NULL;
+	area->proxy_lsp_dirty = false;
+
+	if (!area->area_proxy_enabled)
+		return;
+
+	if (!area->area_proxy_leader_election) {
+		/* Distributed mode: always regenerate */
+		isis_area_proxy_lsp_generate(area);
+		return;
+	}
+
+	/* Leader-election mode: only the leader regenerates */
+	if (!am_i_leader(area)) {
+		area_proxy_debug("Area Proxy: debounce — not leader, skip regenerate");
+		return;
+	}
+
+	if (!isis_area_proxy_ready(area)) {
+		area_proxy_debug("Area Proxy: debounce — not ready, skip regenerate");
+		/* Re-mark dirty so we retry on next trigger */
+		area->proxy_lsp_dirty = true;
+		return;
+	}
+
+	area_proxy_debug("Area Proxy: debounce — regenerating Proxy LSP (LSDB changed)");
+	isis_area_proxy_lsp_generate(area);
+	area->area_proxy_last_gen_time = monotime(NULL);
 }
 
 /*

@@ -654,6 +654,14 @@ void lsp_insert(struct lspdb_head *head, struct isis_lsp *lsp)
 		isis_spf_schedule(lsp->area, lsp->level);
 		isis_te_lsp_event(lsp, LSP_ADD);
 	}
+
+	/*
+	 * RFC 9666: L1 or Inside L2 LSDB change may add new prefixes
+	 * or boundary neighbors to the area proxy aggregation.
+	 * Mark the Proxy LSP dirty so it regenerates after debounce.
+	 */
+	if (lsp->area->area_proxy_enabled && !isis_lsp_is_proxy_lsp(lsp))
+		isis_area_proxy_lsp_mark_dirty(lsp->area);
 }
 
 /*
@@ -1109,6 +1117,11 @@ static void lsp_build(struct isis_lsp *lsp, struct isis_area *area)
 		if (area->area_proxy_enabled &&
 		    area->area_proxy_leader_election)
 			cap.area_leader_priority = area->area_proxy_leader_priority;
+		if (area->area_proxy_enabled) {
+			memcpy(cap.proxy_sysid, area->area_proxy_sysid,
+			       ISIS_SYS_ID_LEN);
+			cap.has_area_proxy_sysid = true;
+		}
 
 		isis_tlvs_set_router_capability(lsp->tlvs, &cap);
 		lsp_debug("ISIS (%s): Adding Router Capabilities information",

@@ -398,9 +398,11 @@ void isis_adj_state_change(struct isis_adjacency **padj,
 
 	/* RFC 9667: L1 adjacency change may affect Area Proxy leader election.
 	 * Trigger re-evaluation so dead leaders are detected promptly. */
-	if (circuit->area->area_proxy_enabled && (adj->level & IS_LEVEL_1))
+	if (circuit->area->area_proxy_enabled && (adj->level & IS_LEVEL_1)) {
 		isis_area_proxy_schedule_election(circuit->area,
 						  "adjacency changed");
+		isis_area_proxy_lsp_mark_dirty(circuit->area);
+	}
 
 	if (del) {
 		isis_delete_adj(adj);

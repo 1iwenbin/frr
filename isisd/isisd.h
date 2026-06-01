@@ -251,6 +251,8 @@ struct isis_area {
 	uint32_t area_proxy_sid;
 	struct isis_lsp *proxy_lsp[ISIS_LEVELS];
 	struct thread *t_proxy_lsp_refresh;
+	struct thread *t_proxy_lsp_debounce;
+	bool proxy_lsp_dirty;
 
 	/* ── RFC 9667 Leader Election ── */
 	bool area_proxy_leader_election;       /* CLI: area-proxy leader-election */
