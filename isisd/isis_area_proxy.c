@@ -1516,20 +1516,13 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	lsp0 = area->proxy_lsp[ISIS_LEVEL2 - 1];
 	if (lsp0) {
 		new_seqno = lsp0->hdr.seqno + 1;
-		/* Remove ALL old fragments from LSDB before re-creating */
-		if (lsp0->lspu.frags) {
-			struct listnode *fn;
-			struct isis_lsp *frag;
-			for (ALL_LIST_ELEMENTS_RO(lsp0->lspu.frags,
-						  fn, frag)) {
-				lsp_search_and_destroy(
-					&area->lspdb[ISIS_LEVEL2 - 1],
-					frag->hdr.lsp_id);
-			}
-			list_delete_all_node(lsp0->lspu.frags);
-		}
-		lsp_search_and_destroy(&area->lspdb[ISIS_LEVEL2 - 1],
-				       lsp0->hdr.lsp_id);
+		/* P0-3a: Do NOT destroy old fragments here.
+		 * They may still be referenced by flood queue,
+		 * lspdb iteration, or L2 receivers.
+		 * Just create new LSP with higher seqno;
+		 * old ones age out naturally (~1200s holdtime).
+		 * P0-3b will add deferred cleanup.
+		 */
 		area->proxy_lsp[ISIS_LEVEL2 - 1] = NULL;
 	}
 	lsp0 = lsp_new(area, lsp_id,
