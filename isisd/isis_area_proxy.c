@@ -35,7 +35,7 @@ void isis_area_proxy_enable(struct isis_area *area)
 		return;
 
 	area->area_proxy_enabled = true;
-	area->proxy_lsp_dirty = false;
+	area->proxy_lsp_dirty = true;  /* trigger initial generation */
 	area->ap_pending_reasons = 0;
 	area->ap_reconcile_running = false;
 	area->proxy_lsp_settle_until = monotime(NULL) + 35;
@@ -1390,9 +1390,15 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 				area->area_proxy_ready_count = 0;
 			} else {
 				area->area_proxy_ready_count++;
-				if (area->area_proxy_ready_count >= 2 &&
-				    area->proxy_lsp_dirty) {
-					area_proxy_debug("Area Proxy: ready+dirty → generate");
+				/* Initial generation: no debounce needed.
+				 * Subsequent regenerations: debounce=2 to
+				 * avoid flapping during SPF micro-convergence. */
+				bool initial = (area->proxy_lsp[ISIS_LEVEL2 - 1] == NULL);
+				uint32_t need = initial ? 1 : 2;
+				if (area->area_proxy_ready_count >= need) {
+					area_proxy_debug("Area Proxy: ready (%s, debounce %u) → generate",
+							initial ? "initial" : "debounced",
+							area->area_proxy_ready_count);
 					isis_area_proxy_lsp_generate(area);
 					area->proxy_lsp_dirty = false;
 					area->area_proxy_last_gen_time = monotime(NULL);
@@ -1408,12 +1414,13 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 			}
 		}
 	} else {
-		/* Distributed mode: generate if dirty */
-		if (area->proxy_lsp_dirty) {
-			isis_area_proxy_lsp_generate(area);
-			area->proxy_lsp_dirty = false;
-			area->area_proxy_last_gen_time = monotime(NULL);
-		}
+		/* Distributed mode: always regenerate on each reconcile tick.
+		 * Dirty flag is checked for event-driven triggers in
+		 * schedule_reconcile(), but here on the periodic timer we
+		 * always refresh the Proxy LSP. */
+		isis_area_proxy_lsp_generate(area);
+		area->proxy_lsp_dirty = false;
+		area->area_proxy_last_gen_time = monotime(NULL);
 	}
 
 	area->ap_reconcile_running = false;
