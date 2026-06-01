@@ -659,8 +659,12 @@ void lsp_insert(struct lspdb_head *head, struct isis_lsp *lsp)
 	 * RFC 9666: L1 or Inside L2 LSDB change may add new prefixes
 	 * or boundary neighbors to the area proxy aggregation.
 	 * Mark the Proxy LSP dirty so it regenerates after debounce.
+	 *
+	 * Do NOT mark dirty for the Proxy LSP itself — that would
+	 * trigger an infinite regeneration loop.
 	 */
-	if (lsp->area->area_proxy_enabled && !isis_lsp_is_proxy_lsp(lsp))
+	if (lsp->area->area_proxy_enabled &&
+	    !isis_lsp_is_proxy_lsp(lsp))
 		isis_area_proxy_lsp_mark_dirty(lsp->area);
 }
 

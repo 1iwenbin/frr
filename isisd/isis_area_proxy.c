@@ -1531,7 +1531,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		return -1;
 	}
 	lsp0->own_lsp = 0;
-	lsp0->lspu.frags = list_new();
+	/* lspu.frags already allocated by lsp_new() → lsp_link_fragment() */
 	area->proxy_lsp[ISIS_LEVEL2 - 1] = lsp0;
 
 	/* --- Calculate available TLV space --- */
@@ -1556,15 +1556,17 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	for (ALL_LIST_ELEMENTS_RO(fragments, node, frag_tlvs)) {
 		struct isis_lsp *frag;
 		if (frag_count == 0) {
-			/* fragment 0 */
+			/* fragment 0 — use the pre-created lsp0 */
 			frag = lsp0;
 		} else {
 			lsp_id[ISIS_SYS_ID_LEN + 1] = frag_count;
+			/* Pass lsp0 so lsp_link_fragment() auto-links
+			 * fragment → lsp0->lspu.frags and sets zero_lsp */
 			frag = lsp_new(area, lsp_id,
 				       area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
 				       new_seqno,
 				       IS_LEVEL_1_AND_2,
-				       0, NULL, ISIS_LEVEL2);
+				       0, lsp0, ISIS_LEVEL2);
 			if (!frag) {
 				isis_free_tlvs(frag_tlvs);
 				continue;
@@ -1580,10 +1582,6 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 
 		/* Insert into LSDB */
 		lsp_insert(&area->lspdb[ISIS_LEVEL2 - 1], frag);
-
-		/* Link non-0 fragments to fragment 0 */
-		if (frag_count > 0)
-			listnode_add(lsp0->lspu.frags, frag);
 
 		frag_count++;
 
