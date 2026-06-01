@@ -1470,6 +1470,15 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	if (!area || !area->area_proxy_enabled)
 		return -1;
 
+	/* P0: reentrancy guard — prevent recursive generate from
+	 * dirty/debounce + periodic timer in same event cycle. */
+	if (area->proxy_lsp_generating) {
+		area_proxy_debug("Area Proxy: generate reentry — skip");
+		area->proxy_lsp_generating = false;
+		return 0;
+	}
+	area->proxy_lsp_generating = true;
+
 	/* Ensure lsp_mtu is initialized before first Proxy LSP generation.
 	 * During config parsing, area->lsp_mtu may still be 0, causing
 	 * lsp_adjust_stream() to create a stream too small for TLVs. */
@@ -1487,6 +1496,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	if (sysid_zero) {
 		zlog_warn("Area Proxy: cannot generate Proxy LSP, "
 			  "proxy-sysid is not configured");
+		area->proxy_lsp_generating = false;
 		return -1;
 	}
 
@@ -1494,6 +1504,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	tlvs = isis_area_proxy_aggregate_tlvs(area);
 	if (!tlvs) {
 		zlog_warn("Area Proxy: aggregation returned NULL TLVs");
+		area->proxy_lsp_generating = false;
 		return -1;
 	}
 
@@ -1528,6 +1539,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		       0, NULL, ISIS_LEVEL2);
 	if (!lsp0) {
 		isis_free_tlvs(tlvs);
+		area->proxy_lsp_generating = false;
 		return -1;
 	}
 	lsp0->own_lsp = 0;    /* proxy sysid != our own System ID */
@@ -1549,6 +1561,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	isis_free_tlvs(tlvs);
 	if (!fragments) {
 		zlog_warn("Area Proxy: isis_fragment_tlvs returned NULL");
+		area->proxy_lsp_generating = false;
 		return -1;
 	}
 
@@ -1614,6 +1627,14 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		}
 	}
 
+	area->proxy_lsp_generating = false;
+
+	/* If mark_dirty was called during generate, schedule debounce */
+	if (area->proxy_lsp_dirty && !area->t_proxy_lsp_debounce) {
+		thread_add_timer(master, isis_area_proxy_lsp_debounce_cb,
+				 area, 3, &area->t_proxy_lsp_debounce);
+	}
+
 	return 0;
 }
 
@@ -1630,6 +1651,14 @@ void isis_area_proxy_lsp_mark_dirty(struct isis_area *area)
 		return;
 
 	area->proxy_lsp_dirty = true;
+
+	/* Do NOT schedule another debounce while a generate is in
+	 * progress — the generate completion will check the dirty flag
+	 * and reschedule if needed. */
+	if (area->proxy_lsp_generating) {
+		area_proxy_debug("Area Proxy: dirty during generate, deferred");
+		return;
+	}
 
 	/* If a debounce timer is already pending, leave it */
 	if (area->t_proxy_lsp_debounce)
@@ -1668,9 +1697,13 @@ static void isis_area_proxy_lsp_debounce_cb(struct thread *t)
 	}
 
 	if (!isis_area_proxy_ready(area)) {
-		area_proxy_debug("Area Proxy: debounce — not ready, skip regenerate");
-		/* Re-mark dirty so we retry on next trigger */
+		area_proxy_debug("Area Proxy: debounce — not ready, reschedule 5s");
+		/* Re-mark dirty and re-schedule debounce;
+		 * do NOT just set the flag and wait for external events:
+		 * during startup that may never come (all nodes already synced). */
 		area->proxy_lsp_dirty = true;
+		thread_add_timer(master, isis_area_proxy_lsp_debounce_cb,
+				 area, 5, &area->t_proxy_lsp_debounce);
 		return;
 	}
 
