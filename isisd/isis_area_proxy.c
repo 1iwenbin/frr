@@ -1242,12 +1242,13 @@ static bool isis_area_proxy_ready(struct isis_area *area)
 				   lsp->tlvs->router_cap->area_leader_priority > 0);
 
 		if (!has_tlv) {
-			area_proxy_debug("Area Proxy: not ready — %pLS missing Type 27 (L1-SPF-reachable)",
-					 lsp->hdr.lsp_id);
+			zlog_info("Area Proxy: not ready — %pLS missing Type 27 TLV (L1-SPF-reachable)",
+				  lsp->hdr.lsp_id);
 			return false;
 		}
 	}
 
+	zlog_info("Area Proxy: ready check passed (all L1-SPF routers have Type 27)");
 	return true;
 }
 
@@ -1385,6 +1386,7 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 
 			ready = isis_area_proxy_ready(area);
 			if (!ready) {
+				zlog_info("Area Proxy: not ready in reconcile, deferring");
 				if (area->area_proxy_ready_count > 0)
 					area->ap_ready_changes++;
 				area->area_proxy_ready_count = 0;
@@ -1395,6 +1397,8 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 				 * avoid flapping during SPF micro-convergence. */
 				bool initial = (area->proxy_lsp[ISIS_LEVEL2 - 1] == NULL);
 				uint32_t need = initial ? 1 : 2;
+				zlog_info("Area Proxy: ready=%u/%u (%s)", area->area_proxy_ready_count, need,
+					  initial ? "initial" : "debounced");
 				if (area->area_proxy_ready_count >= need) {
 					area_proxy_debug("Area Proxy: ready (%s, debounce %u) → generate",
 							initial ? "initial" : "debounced",
