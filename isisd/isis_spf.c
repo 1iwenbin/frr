@@ -784,18 +784,46 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 		if (vertex->d_N == dist) {
 			struct listnode *node;
 			struct isis_vertex_adj *parent_vadj;
-			for (ALL_LIST_ELEMENTS_RO(parent->Adj_N, node,
-						  parent_vadj))
-				if (!isis_vertex_adj_exists(
-					    spftree, vertex,
-					    parent_vadj->sadj)) {
-					bool last_hop = (vertex->depth == 2);
 
-					isis_vertex_adj_add(spftree, vertex,
-							    vertex->Adj_N,
-							    parent_vadj->sadj,
-							    psid, last_hop);
-				}
+			/*
+			 * RFC 9666 / Area Proxy: For Proxy pseudo-node
+			 * vertices (sysid prefix ff ff 00 00 00),
+			 * suppress ECMP Adj_N merge from different parents.
+			 *
+			 * In ring Proxy topologies, the same Proxy vertex
+			 * can be reached through multiple first-hops with
+			 * identical flat metric.  Blindly merging all
+			 * parent->Adj_N entries creates false ECMP that
+			 * causes mutual-pointing next-hop loops in the
+			 * data plane (e.g. R00C00 ↔ R09C00).
+			 *
+			 * By keeping only the FIRST set of first-hops, we
+			 * preserve the correct shortest-path next-hop
+			 * without introducing non-shortest entries.
+			 */
+			static const uint8_t proxy_prefix[] = {
+				0xff, 0xff, 0x00, 0x00, 0x00};
+			bool is_proxy_vertex =
+				(VTYPE_IS(vertex->type) &&
+				 memcmp(vertex->N.id, proxy_prefix,
+					sizeof(proxy_prefix)) == 0);
+
+			if (!is_proxy_vertex) {
+				for (ALL_LIST_ELEMENTS_RO(parent->Adj_N,
+							  node, parent_vadj))
+					if (!isis_vertex_adj_exists(
+						    spftree, vertex,
+						    parent_vadj->sadj)) {
+						bool last_hop =
+							(vertex->depth == 2);
+
+						isis_vertex_adj_add(
+							spftree, vertex,
+							vertex->Adj_N,
+							parent_vadj->sadj,
+							psid, last_hop);
+					}
+			}
 			if (CHECK_FLAG(spftree->flags,
 				       F_SPFTREE_HOPCOUNT_METRIC))
 				vertex_update_firsthops(vertex, parent);
