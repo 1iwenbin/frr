@@ -786,27 +786,33 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 			struct isis_vertex_adj *parent_vadj;
 
 			/*
-			 * RFC 9666 / Area Proxy: For Proxy pseudo-node
-			 * vertices (sysid prefix ff ff 00 00 00),
-			 * suppress ECMP Adj_N merge from different parents.
+			 * WORKAROUND (P0 mitigation, not final fix):
+			 * Suppress ECMP Adj_N merge for Proxy pseudo-node
+			 * vertices to avoid mutual-pointing next-hop loops
+			 * in ring Proxy topologies (e.g. R00C00 ↔ R09C00).
 			 *
-			 * In ring Proxy topologies, the same Proxy vertex
-			 * can be reached through multiple first-hops with
-			 * identical flat metric.  Blindly merging all
-			 * parent->Adj_N entries creates false ECMP that
-			 * causes mutual-pointing next-hop loops in the
-			 * data plane (e.g. R00C00 ↔ R09C00).
+			 * In flat-metric SPF, a Proxy vertex in a ring can
+			 * be reached through multiple first-hops with
+			 * identical total metric.  Blindly merging all
+			 * parent->Adj_N entries creates routes where two
+			 * nodes become each other's next-hop, causing
+			 * data-plane forwarding loops.
 			 *
-			 * By keeping only the FIRST set of first-hops, we
-			 * preserve the correct shortest-path next-hop
-			 * without introducing non-shortest entries.
+			 * Trade-off: this disables legitimate Proxy ECMP
+			 * load-sharing.  A proper fix requires either
+			 * (a) inter/intra-area layered metric (RFC 9717),
+			 * or (b) candidate-path distance validation in
+			 * Adj_N merge.
+			 *
+			 * TODO: replace with correct RFC 9717 SPF semantics.
 			 */
-			static const uint8_t proxy_prefix[] = {
+			static const uint8_t proxy_sysid_prefix[] = {
 				0xff, 0xff, 0x00, 0x00, 0x00};
 			bool is_proxy_vertex =
-				(VTYPE_IS(vertex->type) &&
-				 memcmp(vertex->N.id, proxy_prefix,
-					sizeof(proxy_prefix)) == 0);
+				(spftree->area->area_proxy_enabled &&
+				 VTYPE_IS(vertex->type) &&
+				 memcmp(vertex->N.id, proxy_sysid_prefix,
+					sizeof(proxy_sysid_prefix)) == 0);
 
 			if (!is_proxy_vertex) {
 				for (ALL_LIST_ELEMENTS_RO(parent->Adj_N,
