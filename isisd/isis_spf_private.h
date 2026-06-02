@@ -71,6 +71,7 @@ struct isis_vertex {
 		} ip;
 	} N;
 	uint32_t d_N;	  /* d(N) Distance from this IS      */
+	uint32_t d_inter; /* RFC 9717: inter-area metric portion of d_N */
 	uint16_t depth;	/* The depth in the imaginary tree */
 	struct list *Adj_N;    /* {Adj(N)} next hop or neighbor list */
 	struct list *parents;  /* list of parents for ECMP */

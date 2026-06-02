@@ -576,8 +576,9 @@ static void vertex_update_firsthops(struct isis_vertex *vertex,
  */
 static struct isis_vertex *
 isis_spf_add2tent(struct isis_spftree *spftree, enum vertextype vtype, void *id,
-		  uint32_t cost, int depth, struct isis_spf_adj *sadj,
-		  struct isis_prefix_sid *psid, struct isis_vertex *parent)
+		  uint32_t cost, uint32_t d_inter, int depth,
+		  struct isis_spf_adj *sadj, struct isis_prefix_sid *psid,
+		  struct isis_vertex *parent)
 {
 	struct isis_vertex *vertex;
 	struct listnode *node;
@@ -603,6 +604,7 @@ isis_spf_add2tent(struct isis_spftree *spftree, enum vertextype vtype, void *id,
 
 	vertex = isis_vertex_new(spftree, id, vtype);
 	vertex->d_N = cost;
+	vertex->d_inter = d_inter;
 	vertex->depth = depth;
 	if (VTYPE_IP(vtype) && spftree->area->srdb.enabled && psid) {
 		struct isis_area *area = spftree->area;
@@ -676,6 +678,7 @@ isis_spf_add2tent(struct isis_spftree *spftree, enum vertextype vtype, void *id,
 static void isis_spf_add_local(struct isis_spftree *spftree,
 			       enum vertextype vtype, void *id,
 			       struct isis_spf_adj *sadj, uint32_t cost,
+			       uint32_t d_inter,
 			       struct isis_prefix_sid *psid,
 			       struct isis_vertex *parent)
 {
@@ -713,20 +716,29 @@ static void isis_spf_add_local(struct isis_spftree *spftree,
 		}
 	}
 
-	isis_spf_add2tent(spftree, vtype, id, cost, 1, sadj, psid, parent);
+	isis_spf_add2tent(spftree, vtype, id, cost, d_inter, 1, sadj, psid,
+			   parent);
 	return;
 }
 
 static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
-		      void *id, uint32_t dist, uint16_t depth,
-		      struct isis_prefix_sid *psid, struct isis_vertex *parent)
+		      void *id, uint32_t dist, uint32_t inter_metric,
+		      uint16_t depth, struct isis_prefix_sid *psid,
+		      struct isis_vertex *parent)
 {
 	struct isis_vertex *vertex;
+	uint32_t candidate_d_inter;
+
 #ifdef EXTREME_DEBUG
 	char buff[VID2STR_BUFFER];
 #endif
 
 	assert(spftree && parent);
+
+	/* RFC 9717: inter-area metric = parent's inter-area + this hop's
+	 * inter-area portion (non-zero only for Proxy→Proxy links).
+	 */
+	candidate_d_inter = parent->d_inter + inter_metric;
 
 	if (CHECK_FLAG(spftree->flags, F_SPFTREE_HOPCOUNT_METRIC)
 	    && !VTYPE_IS(vtype))
@@ -782,46 +794,48 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 				(parent ? listcount(parent->Adj_N) : 0));
 #endif /* EXTREME_DEBUG */
 		if (vertex->d_N == dist) {
-			struct listnode *node;
-			struct isis_vertex_adj *parent_vadj;
-
 			/*
-			 * WORKAROUND (P0 mitigation, not final fix):
-			 * Suppress ECMP Adj_N merge for Proxy pseudo-node
-			 * vertices to avoid mutual-pointing next-hop loops
-			 * in ring Proxy topologies (e.g. R00C00 ↔ R09C00).
-			 *
-			 * In flat-metric SPF, a Proxy vertex in a ring can
-			 * be reached through multiple first-hops with
-			 * identical total metric.  Blindly merging all
-			 * parent->Adj_N entries creates routes where two
-			 * nodes become each other's next-hop, causing
-			 * data-plane forwarding loops.
-			 *
-			 * Trade-off: this disables legitimate Proxy ECMP
-			 * load-sharing.  A proper fix requires either
-			 * (a) inter/intra-area layered metric (RFC 9717),
-			 * or (b) candidate-path distance validation in
-			 * Adj_N merge.
-			 *
-			 * Known minor inconsistency: the suppressed parent
-			 * is still added to vertex->parents (used by
-			 * LFA/TI-LFA/topology display), while Adj_N only
-			 * reflects the first path.  No functional impact
-			 * on route installation.
-			 *
-			 * TODO: replace with correct RFC 9717 SPF semantics.
+			 * RFC 9717: composite distance comparison.
+			 * When total metric (d_N) is equal, prefer the
+			 * path with lower inter-area metric.  Only
+			 * merge Adj_N for ECMP when BOTH total and
+			 * inter-area metrics are equal.
 			 */
-			static const uint8_t proxy_sysid_prefix[] = {
-				0xff, 0xff, 0x00, 0x00, 0x00};
-			bool is_proxy_vertex =
-				(spftree->level == ISIS_LEVEL2 &&
-				 spftree->area->area_proxy_enabled &&
-				 VTYPE_IS(vertex->type) &&
-				 memcmp(vertex->N.id, proxy_sysid_prefix,
-					sizeof(proxy_sysid_prefix)) == 0);
+			if (vertex->d_inter < candidate_d_inter) {
+				/* Existing path has less inter-area
+				 * cost — better path, ignore new. */
+#ifdef EXTREME_DEBUG
+				if (IS_DEBUG_SPF_EVENTS)
+					zlog_debug(
+						"ISIS-SPF: process_N %s equal dist %d but worse inter-area %u > %u — ignore",
+						print_sys_hostname(vertex->N.id),
+						dist, candidate_d_inter,
+						vertex->d_inter);
+#endif
+				if (listnode_lookup(vertex->parents, parent) == NULL)
+					listnode_add(vertex->parents, parent);
+				return;
+			} else if (vertex->d_inter > candidate_d_inter) {
+				/* New path has less inter-area cost —
+				 * replace existing vertex. */
+#ifdef EXTREME_DEBUG
+				if (IS_DEBUG_SPF_EVENTS)
+					zlog_debug(
+						"ISIS-SPF: process_N %s equal dist %d but better inter-area %u < %u — replace",
+						print_sys_hostname(vertex->N.id),
+						dist, candidate_d_inter,
+						vertex->d_inter);
+#endif
+				isis_vertex_queue_delete(&spftree->tents, vertex);
+				hash_release(spftree->prefix_sids, vertex);
+				isis_vertex_del(vertex);
+				/* Fall through to add2tent below */
+			} else {
+				/* Both total and inter-area equal —
+				 * true ECMP, merge Adj_N. */
+				struct listnode *node;
+				struct isis_vertex_adj *parent_vadj;
 
-			if (!is_proxy_vertex) {
 				for (ALL_LIST_ELEMENTS_RO(parent->Adj_N,
 							  node, parent_vadj))
 					if (!isis_vertex_adj_exists(
@@ -836,18 +850,19 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 							parent_vadj->sadj,
 							psid, last_hop);
 					}
+				if (CHECK_FLAG(spftree->flags,
+					       F_SPFTREE_HOPCOUNT_METRIC))
+					vertex_update_firsthops(vertex, parent);
+				/*      2) */
+				if (!CHECK_FLAG(spftree->flags,
+						F_SPFTREE_NO_ADJACENCIES)
+				    && listcount(vertex->Adj_N) > ISIS_MAX_PATH_SPLITS)
+					remove_excess_adjs(vertex->Adj_N);
+				if (listnode_lookup(vertex->parents, parent) == NULL)
+					listnode_add(vertex->parents, parent);
+				return;
 			}
-			if (CHECK_FLAG(spftree->flags,
-				       F_SPFTREE_HOPCOUNT_METRIC))
-				vertex_update_firsthops(vertex, parent);
-			/*      2) */
-			if (!CHECK_FLAG(spftree->flags,
-					F_SPFTREE_NO_ADJACENCIES)
-			    && listcount(vertex->Adj_N) > ISIS_MAX_PATH_SPLITS)
-				remove_excess_adjs(vertex->Adj_N);
-			if (listnode_lookup(vertex->parents, parent) == NULL)
-				listnode_add(vertex->parents, parent);
-			return;
+			/* Falls through to add2tent only on replace */
 		} else if (vertex->d_N < dist) {
 			return;
 			/*      4) */
@@ -866,7 +881,8 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 			(parent ? print_sys_hostname(parent->N.id) : "null"));
 #endif /* EXTREME_DEBUG */
 
-	isis_spf_add2tent(spftree, vtype, id, dist, depth, NULL, psid, parent);
+	isis_spf_add2tent(spftree, vtype, id, dist, candidate_d_inter, depth,
+			   NULL, psid, parent);
 	return;
 }
 
@@ -886,6 +902,9 @@ static int isis_spf_process_lsp(struct isis_spftree *spftree,
 	struct isis_mt_router_info *mt_router_info = NULL;
 	struct prefix_pair ip_info;
 	bool has_valid_psid;
+	bool parent_is_proxy;
+	static const uint8_t proxy_sysid_prefix[] = {
+		0xff, 0xff, 0x00, 0x00, 0x00};
 
 	if (isis_lfa_excise_node_check(spftree, lsp->hdr.lsp_id)) {
 		if (IS_DEBUG_LFA)
@@ -913,6 +932,8 @@ static int isis_spf_process_lsp(struct isis_spftree *spftree,
 			    || (spftree->mtid == ISIS_MT_IPV4_UNICAST
 				&& !ISIS_MASK_LSP_OL_BIT(lsp->hdr.lsp_bits))
 			    || (mt_router_info && !mt_router_info->overload));
+
+	parent_is_proxy = isis_lsp_is_proxy_lsp(lsp);
 
 lspfragloop:
 	if (lsp->hdr.seqno == 0) {
@@ -947,12 +968,20 @@ lspfragloop:
 					       ISIS_SYS_ID_LEN))
 					continue;
 				dist = cost + r->metric;
-				process_N(spftree,
-					  LSP_PSEUDO_ID(r->id)
-						  ? VTYPE_PSEUDO_IS
-						  : VTYPE_NONPSEUDO_IS,
-					  (void *)r->id, dist, depth + 1, NULL,
-					  parent);
+				{
+					bool target_is_proxy =
+						(memcmp(r->id, proxy_sysid_prefix,
+							sizeof(proxy_sysid_prefix)) == 0);
+					uint32_t inter_metric =
+						(parent_is_proxy && target_is_proxy)
+							? r->metric : 0;
+					process_N(spftree,
+						  LSP_PSEUDO_ID(r->id)
+							  ? VTYPE_PSEUDO_IS
+							  : VTYPE_NONPSEUDO_IS,
+						  (void *)r->id, dist, inter_metric,
+						  depth + 1, NULL, parent);
+				}
 			}
 		}
 
@@ -984,12 +1013,22 @@ lspfragloop:
 						     F_SPFTREE_HOPCOUNT_METRIC)
 						  ? 1
 						  : er->metric);
-				process_N(spftree,
-					  LSP_PSEUDO_ID(er->id)
-						  ? VTYPE_PSEUDO_TE_IS
-						  : VTYPE_NONPSEUDO_TE_IS,
-					  (void *)er->id, dist, depth + 1, NULL,
-					  parent);
+				{
+					uint32_t link_m = CHECK_FLAG(spftree->flags,
+						F_SPFTREE_HOPCOUNT_METRIC) ? 1 : er->metric;
+					bool target_is_proxy =
+						(memcmp(er->id, proxy_sysid_prefix,
+							sizeof(proxy_sysid_prefix)) == 0);
+					uint32_t inter_metric =
+						(parent_is_proxy && target_is_proxy)
+							? link_m : 0;
+					process_N(spftree,
+						  LSP_PSEUDO_ID(er->id)
+							  ? VTYPE_PSEUDO_TE_IS
+							  : VTYPE_NONPSEUDO_TE_IS,
+						  (void *)er->id, dist, inter_metric,
+						  depth + 1, NULL, parent);
+				}
 			}
 		}
 	}
@@ -1016,7 +1055,7 @@ lspfragloop:
 				ip_info.dest.u.prefix4 = r->prefix.prefix;
 				ip_info.dest.prefixlen = r->prefix.prefixlen;
 				process_N(spftree, vtype, &ip_info,
-					  dist, depth + 1, NULL, parent);
+					  dist, 0, depth + 1, NULL, parent);
 			}
 		}
 	}
@@ -1060,7 +1099,7 @@ lspfragloop:
 
 					has_valid_psid = true;
 					process_N(spftree, VTYPE_IPREACH_TE,
-						  &ip_info, dist, depth + 1,
+						  &ip_info, dist, 0, depth + 1,
 						  psid, parent);
 					/*
 					 * Stop the Prefix-SID iteration since
@@ -1072,7 +1111,7 @@ lspfragloop:
 			}
 			if (!has_valid_psid)
 				process_N(spftree, VTYPE_IPREACH_TE, &ip_info,
-					  dist, depth + 1, NULL, parent);
+					  dist, 0, depth + 1, NULL, parent);
 		}
 	}
 
@@ -1128,7 +1167,7 @@ lspfragloop:
 
 					has_valid_psid = true;
 					process_N(spftree, vtype, &ip_info,
-						  dist, depth + 1, psid,
+						  dist, 0, depth + 1, psid,
 						  parent);
 					/*
 					 * Stop the Prefix-SID iteration since
@@ -1140,7 +1179,7 @@ lspfragloop:
 			}
 			if (!has_valid_psid)
 				process_N(spftree, vtype, &ip_info, dist,
-					  depth + 1, NULL, parent);
+					  0, depth + 1, NULL, parent);
 		}
 	}
 
@@ -1169,7 +1208,7 @@ end:
 			ip_info.dest.family = AF_INET6;
 			vtype = VTYPE_IP6REACH_INTERNAL;
 		}
-		process_N(spftree, vtype, &ip_info, cost, depth + 1, NULL,
+		process_N(spftree, vtype, &ip_info, cost, 0, depth + 1, NULL,
 			  parent);
 	}
 
@@ -1251,7 +1290,7 @@ static int isis_spf_preload_tent_ip_reach_cb(const struct prefix *prefix,
 				continue;
 
 			has_valid_psid = true;
-			isis_spf_add_local(spftree, vtype, &ip_info, NULL, 0,
+			isis_spf_add_local(spftree, vtype, &ip_info, NULL, 0, 0,
 					   psid, parent);
 
 			/*
@@ -1262,7 +1301,7 @@ static int isis_spf_preload_tent_ip_reach_cb(const struct prefix *prefix,
 		}
 	}
 	if (!has_valid_psid)
-		isis_spf_add_local(spftree, vtype, &ip_info, NULL, 0, NULL,
+		isis_spf_add_local(spftree, vtype, &ip_info, NULL, 0, 0, NULL,
 				   parent);
 
 	return LSP_ITER_CONTINUE;
@@ -1312,7 +1351,7 @@ static void isis_spf_preload_tent(struct isis_spftree *spftree,
 						      F_ISIS_SPF_ADJ_OLDMETRIC)
 						   ? VTYPE_NONPSEUDO_IS
 						   : VTYPE_NONPSEUDO_TE_IS,
-					   sadj->id, sadj, metric, NULL,
+					   sadj->id, sadj, metric, 0, NULL,
 					   parent);
 		} else if (sadj->lsp) {
 			isis_spf_process_lsp(spftree, sadj->lsp, metric, 0,
