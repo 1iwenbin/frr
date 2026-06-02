@@ -85,6 +85,17 @@ static bool speaks(uint8_t *protocols, uint8_t count, int family)
 	return false;
 }
 
+/*
+ * Returns true if @sysid matches the Proxy System ID prefix
+ * (ffff.0000.00xx), indicating a Proxy pseudo-node vertex.
+ */
+static bool isis_spf_sysid_is_proxy(const uint8_t *sysid)
+{
+	static const uint8_t prefix[] = {0xff, 0xff, 0x00, 0x00, 0x00};
+
+	return memcmp(sysid, prefix, sizeof(prefix)) == 0;
+}
+
 struct isis_spf_run {
 	struct isis_area *area;
 	int level;
@@ -803,17 +814,9 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 			 */
 			if (vertex->d_inter < candidate_d_inter) {
 				/* Existing path has less inter-area
-				 * cost — better path, ignore new. */
-#ifdef EXTREME_DEBUG
-				if (IS_DEBUG_SPF_EVENTS)
-					zlog_debug(
-						"ISIS-SPF: process_N %s equal dist %d but worse inter-area %u > %u — ignore",
-						print_sys_hostname(vertex->N.id),
-						dist, candidate_d_inter,
-						vertex->d_inter);
-#endif
-				if (listnode_lookup(vertex->parents, parent) == NULL)
-					listnode_add(vertex->parents, parent);
+				 * cost — better path, ignore new.
+				 * Do NOT add to parents: this is not
+				 * an equivalent path. */
 				return;
 			} else if (vertex->d_inter > candidate_d_inter) {
 				/* New path has less inter-area cost —
@@ -903,8 +906,6 @@ static int isis_spf_process_lsp(struct isis_spftree *spftree,
 	struct prefix_pair ip_info;
 	bool has_valid_psid;
 	bool parent_is_proxy;
-	static const uint8_t proxy_sysid_prefix[] = {
-		0xff, 0xff, 0x00, 0x00, 0x00};
 
 	if (isis_lfa_excise_node_check(spftree, lsp->hdr.lsp_id)) {
 		if (IS_DEBUG_LFA)
@@ -970,8 +971,7 @@ lspfragloop:
 				dist = cost + r->metric;
 				{
 					bool target_is_proxy =
-						(memcmp(r->id, proxy_sysid_prefix,
-							sizeof(proxy_sysid_prefix)) == 0);
+						isis_spf_sysid_is_proxy(r->id);
 					uint32_t inter_metric =
 						(parent_is_proxy && target_is_proxy)
 							? r->metric : 0;
@@ -1017,8 +1017,7 @@ lspfragloop:
 					uint32_t link_m = CHECK_FLAG(spftree->flags,
 						F_SPFTREE_HOPCOUNT_METRIC) ? 1 : er->metric;
 					bool target_is_proxy =
-						(memcmp(er->id, proxy_sysid_prefix,
-							sizeof(proxy_sysid_prefix)) == 0);
+						isis_spf_sysid_is_proxy(er->id);
 					uint32_t inter_metric =
 						(parent_is_proxy && target_is_proxy)
 							? link_m : 0;
