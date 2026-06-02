@@ -804,12 +804,19 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 			 * or (b) candidate-path distance validation in
 			 * Adj_N merge.
 			 *
+			 * Known minor inconsistency: the suppressed parent
+			 * is still added to vertex->parents (used by
+			 * LFA/TI-LFA/topology display), while Adj_N only
+			 * reflects the first path.  No functional impact
+			 * on route installation.
+			 *
 			 * TODO: replace with correct RFC 9717 SPF semantics.
 			 */
 			static const uint8_t proxy_sysid_prefix[] = {
 				0xff, 0xff, 0x00, 0x00, 0x00};
 			bool is_proxy_vertex =
-				(spftree->area->area_proxy_enabled &&
+				(spftree->level == ISIS_LEVEL2 &&
+				 spftree->area->area_proxy_enabled &&
 				 VTYPE_IS(vertex->type) &&
 				 memcmp(vertex->N.id, proxy_sysid_prefix,
 					sizeof(proxy_sysid_prefix)) == 0);
