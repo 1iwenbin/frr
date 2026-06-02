@@ -842,6 +842,36 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 				vid2string(vertex, buff, sizeof(buff)), dist);
 #endif /* EXTREME_DEBUG */
 		assert(dist >= vertex->d_N);
+		/*
+		 * Equal-cost path arriving after vertex entered PATHS:
+		 * still merge Adj_N to avoid losing valid next-hops
+		 * (e.g. correct Proxy ring direction vs loop direction).
+		 * Downstream vertices already processed won't pick up
+		 * the new Adj_N in this SPF run, but the vertex's own
+		 * Adj_N is used directly in route installation for
+		 * IP prefix vertices.
+		 */
+		if (dist == vertex->d_N) {
+			struct listnode *node;
+			struct isis_vertex_adj *parent_vadj;
+
+			for (ALL_LIST_ELEMENTS_RO(parent->Adj_N, node,
+						  parent_vadj))
+				if (!isis_vertex_adj_exists(
+					    spftree, vertex,
+					    parent_vadj->sadj)) {
+					bool last_hop =
+						(vertex->depth == 2);
+					isis_vertex_adj_add(
+						spftree, vertex,
+						vertex->Adj_N,
+						parent_vadj->sadj,
+						NULL, last_hop);
+				}
+			if (listnode_lookup(vertex->parents, parent)
+			    == NULL)
+				listnode_add(vertex->parents, parent);
+		}
 		return;
 	}
 
