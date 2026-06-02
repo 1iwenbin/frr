@@ -1610,35 +1610,58 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		return -1;
 	}
 
-	/* --- Assign fragmented TLVs to LSPs, link via lspu.frags --- */
+	/* --- Assign fragmented TLVs to LSPs, link via lspu.frags ---
+	 *
+	 * Fragment 0: reused if already in area->proxy_lsp[L2-1] (frag0_reused).
+	 * Fragment 1+: searched in LSDB by LSP ID; reused in-place if found.
+	 * Any reused fragment skips lsp_insert() to avoid lsp_destroy + UAF. */
 	bool frag0_reused = (area->proxy_lsp[ISIS_LEVEL2 - 1] == lsp0 &&
 			     lsp0->tlvs == NULL);
 	for (ALL_LIST_ELEMENTS_RO(fragments, node, frag_tlvs)) {
 		struct isis_lsp *frag;
+		bool frag_exists;
+
 		if (frag_count == 0) {
 			/* fragment 0 — use the pre-created lsp0 */
 			frag = lsp0;
+			frag_exists = frag0_reused;
 		} else {
 			lsp_id[ISIS_SYS_ID_LEN + 1] = frag_count;
-			frag = lsp_new(area, lsp_id,
-				       area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
-				       new_seqno,
-				       IS_LEVEL_1_AND_2,
-				       0, lsp0, ISIS_LEVEL2);
-			if (!frag) {
-				isis_free_tlvs(frag_tlvs);
-				continue;
+			/* Search LSDB for existing fragment — reuse in-place
+			 * to avoid lsp_destroy → purge PDU flood. */
+			frag = lsp_search(&area->lspdb[ISIS_LEVEL2 - 1],
+					 lsp_id);
+			if (frag) {
+				frag_exists = true;
+				/* All fragments share the same seqno as
+				 * fragment 0.  Do NOT call lsp_inc_seqno()
+				 * here — it would diverge from frag 0. */
+				frag->hdr.seqno = new_seqno;
+				if (frag->tlvs) {
+					isis_free_tlvs(frag->tlvs);
+					frag->tlvs = NULL;
+				}
+			} else {
+				frag_exists = false;
+				frag = lsp_new(area, lsp_id,
+					       area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
+					       new_seqno,
+					       IS_LEVEL_1_AND_2,
+					       0, lsp0, ISIS_LEVEL2);
+				if (!frag) {
+					isis_free_tlvs(frag_tlvs);
+					continue;
+				}
+				frag->own_lsp = 0;
 			}
-			frag->own_lsp = 0;
 		}
 
 		frag->tlvs = frag_tlvs;
 		lsp_pack_pdu_ext(frag);
 
-		/* Fragment 0 reused: already in LSDB, just flood.
-		 * Calling lsp_insert() on the same struct would
-		 * trigger lsp_destroy → use-after-free. */
-		if (frag_count == 0 && frag0_reused) {
+		/* Fragment already in LSDB: skip lsp_insert() to avoid
+		 * lsp_destroy on the same struct (UAF / purge flood). */
+		if (frag_exists) {
 			/* already in LSDB — just flood updated PDU */
 		} else {
 			lsp_insert(&area->lspdb[ISIS_LEVEL2 - 1], frag);
@@ -1656,23 +1679,17 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		  lsp_id, frag_count);
 	area->ap_lsp_gen_count++;
 
-	/* Flood all fragments to L2 circuits */
-	{
-		struct isis_circuit *circuit;
-		struct listnode *cnode;
+	/* Flood all fragments to L2 circuits.
+	 * lsp_flood(lsp, NULL) sets SRM on all circuits; the Area Proxy
+	 * flood filter inside lsp_set_all_srmflags() handles per-circuit
+	 * isolation (Proxy LSP → unconditional flood, others → filtered). */
+	lsp_flood(lsp0, NULL);
+	if (lsp0->lspu.frags) {
 		struct listnode *lnode;
 		struct isis_lsp *flsp;
 
-		for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
-			if (circuit->is_passive)
-				continue;
-			lsp_flood(lsp0, circuit);
-			if (lsp0->lspu.frags) {
-				for (ALL_LIST_ELEMENTS_RO(lsp0->lspu.frags,
-							  lnode, flsp))
-					lsp_flood(flsp, circuit);
-			}
-		}
+		for (ALL_LIST_ELEMENTS_RO(lsp0->lspu.frags, lnode, flsp))
+			lsp_flood(flsp, NULL);
 	}
 
 	area->ap_reconcile_running = false;
