@@ -1679,7 +1679,39 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		  lsp_id, frag_count);
 	area->ap_lsp_gen_count++;
 
-	/* Flood all fragments to L2 circuits.
+	/* ── Purge obsolete fragments (pseudo_id >= frag_count) ──
+	 * When the new generation has fewer fragments than the old one
+	 * (e.g. topology shrinks), the leftover fragments must be
+	 * explicitly purged.  Otherwise they persist in LSDB and on
+	 * remote nodes, advertising stale prefix/reachability.
+	 *
+	 * Safe unlinking: collect listnodes to delete, then remove
+	 * after the iteration so we don't invalidate the iterator. */
+	if (lsp0->lspu.frags) {
+		struct listnode *lnode, *lnode_next;
+		struct isis_lsp *flsp;
+
+		for (lnode = listhead(lsp0->lspu.frags);
+		     lnode; lnode = lnode_next) {
+			lnode_next = listnextnode(lnode);
+			flsp = listgetdata(lnode);
+			uint8_t pid = LSP_PSEUDO_ID(flsp->hdr.lsp_id);
+
+			if (pid >= frag_count) {
+				zlog_info("Area Proxy: purging obsolete fragment %pLS (id=%d >= %d)",
+					  flsp->hdr.lsp_id, pid, frag_count);
+				/* Send purge PDU to all neighbours */
+				flsp->hdr.rem_lifetime = 0;
+				lsp_pack_pdu_ext(flsp);
+				lsp_flood(flsp, NULL);
+				/* Unlink from lspu.frags — the LSP stays in
+				 * LSDB and will be cleaned up by age_out. */
+				list_delete_node(lsp0->lspu.frags, lnode);
+			}
+		}
+	}
+
+	/* Flood all valid fragments to L2 circuits.
 	 * lsp_flood(lsp, NULL) sets SRM on all circuits; the Area Proxy
 	 * flood filter inside lsp_set_all_srmflags() handles per-circuit
 	 * isolation (Proxy LSP → unconditional flood, others → filtered). */
