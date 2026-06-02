@@ -79,6 +79,7 @@ struct isis_vertex {
 	uint64_t insert_counter;
 	uint8_t flags;
 	uint8_t inter_area_count;  /* RFC 9666 §3.2: number of Area Proxy boundaries crossed */
+	bool use_layered_metric;   /* TENT ordering: true → (d_inter, d_intra) */
 };
 #define F_ISIS_VERTEX_LFA_PROTECTED	0x01
 
@@ -139,22 +140,43 @@ __attribute__((__unused__)) static int isis_vertex_queue_tent_cmp(const void *a,
 	const struct isis_vertex *va = a;
 	const struct isis_vertex *vb = b;
 
-	/*
-	 * RFC 9666 §3.2: intra-area metrics MUST be treated as less
-	 * than any inter-area metric.  Paths that cross fewer Area
-	 * Proxy boundaries are preferred, regardless of total metric.
-	 */
-	if (va->inter_area_count < vb->inter_area_count)
-		return -1;
+	if (va->use_layered_metric) {
+		/*
+		 * MODE_LAYERED (RFC 9717):
+		 *   Primary:   inter-area metric (d_inter)
+		 *   Secondary: intra-area metric (d_N - d_inter)
+		 *
+		 * This ensures each TENT pop yields the vertex with
+		 * the smallest (d_inter, d_intra) tuple — the
+		 * correct Dijkstra ordering for layered metric.
+		 */
+		if (va->d_inter < vb->d_inter)
+			return -1;
+		if (va->d_inter > vb->d_inter)
+			return 1;
+		uint32_t a_intra = va->d_N - va->d_inter;
+		uint32_t b_intra = vb->d_N - vb->d_inter;
+		if (a_intra < b_intra)
+			return -1;
+		if (a_intra > b_intra)
+			return 1;
+	} else {
+		/*
+		 * RFC 9666 §3.2: intra-area metrics MUST be treated as
+		 * less than any inter-area metric.  Paths that cross
+		 * fewer Area Proxy boundaries are preferred, regardless
+		 * of total metric.
+		 */
+		if (va->inter_area_count < vb->inter_area_count)
+			return -1;
+		if (va->inter_area_count > vb->inter_area_count)
+			return 1;
 
-	if (va->inter_area_count > vb->inter_area_count)
-		return 1;
-
-	if (va->d_N < vb->d_N)
-		return -1;
-
-	if (va->d_N > vb->d_N)
-		return 1;
+		if (va->d_N < vb->d_N)
+			return -1;
+		if (va->d_N > vb->d_N)
+			return 1;
+	}
 
 	if (va->type < vb->type)
 		return -1;

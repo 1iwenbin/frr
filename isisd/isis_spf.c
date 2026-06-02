@@ -100,7 +100,7 @@ static bool isis_spf_sysid_is_proxy(const uint8_t *sysid)
  * Area Proxy metric comparison — abstracted for evolvability
  * toward full RFC 9717 layered metric.
  *
- * MODE_FLAT (current): flat SPF + inter-area tie-breaker
+ * MODE_FLAT: flat SPF + inter-area tie-breaker
  *   Compare (d_N, d_inter) — total distance first, inter-area second.
  *
  * MODE_LAYERED (full RFC 9717): layered metric
@@ -109,9 +109,10 @@ static bool isis_spf_sysid_is_proxy(const uint8_t *sysid)
  * Mode is selected by spftree->use_layered_metric, set when
  * area_proxy_enabled && level == ISIS_LEVEL2.
  *
- * To switch to MODE_LAYERED: change isis_run_spf() to set
- * use_layered_metric = true when area_proxy_enabled && L2.
- * No callers of this function need modification.
+ * NOTE: full MODE_LAYERED requires TENT ordering (isis_vertex_queue_tent_cmp),
+ * process_N comparison, ECMP conditions, and PATHS IP merge conditions
+ * to all use metric-tuple comparison.  See isis_spf_private.h tent_cmp
+ * and process_N() for the coordinated changes.
  *
  * Returns: <0 if a is better (shorter)
  *          >0 if b is better
@@ -673,6 +674,7 @@ isis_spf_add2tent(struct isis_spftree *spftree, enum vertextype vtype, void *id,
 	vertex->d_N = cost;
 	vertex->d_inter = d_inter;
 	vertex->depth = depth;
+	vertex->use_layered_metric = spftree->use_layered_metric;
 	if (VTYPE_IP(vtype) && spftree->area->srdb.enabled && psid) {
 		struct isis_area *area = spftree->area;
 		struct isis_vertex *vertex_psid;
@@ -854,10 +856,18 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 				vtype2string(vtype),
 				vid2string(vertex, buff, sizeof(buff)), dist);
 #endif /* EXTREME_DEBUG */
-		assert(dist >= vertex->d_N);
+		/*
+		 * MODE_LAYERED: a path with larger d_N but smaller
+		 * d_inter may be strictly better.  Only assert d_N
+		 * monotonicity in MODE_FLAT.
+		 */
+		if (!spftree->use_layered_metric)
+			assert(dist >= vertex->d_N);
+
 		/*
 		 * Equal-cost path arriving after vertex entered PATHS:
-		 * merge Adj_N only for IP prefix vertices (VTYPE_IP).
+		 * merge Adj_N only for IP prefix vertices (VTYPE_IP),
+		 * and only when the metric tuple is truly equal.
 		 *
 		 * IP prefix vertices are not expanded to downstream
 		 * vertices; their Adj_N is used directly by the
@@ -868,10 +878,12 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 		 * IS/Proxy vertices must NOT be merged in PATHS:
 		 * their downstream vertices were already processed
 		 * with the old Adj_N and won't pick up the change.
-		 * Those cases are handled by the TENT-phase
-		 * tie-breaker (d_inter comparison).
 		 */
-		if (dist == vertex->d_N && VTYPE_IP(vertex->type)) {
+		if (area_proxy_metric_cmp(spftree,
+					  vertex->d_N, vertex->d_inter,
+					  dist,
+					  candidate_d_inter) == 0
+		    && VTYPE_IP(vertex->type)) {
 			struct listnode *node;
 			struct isis_vertex_adj *parent_vadj;
 
@@ -910,72 +922,65 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 					: "null"),
 				(parent ? listcount(parent->Adj_N) : 0));
 #endif /* EXTREME_DEBUG */
-		if (vertex->d_N == dist) {
-			/*
-			 * Area Proxy inter-area tie-breaker
-			 * (Phase 1 — evolvable toward full layered metric).
-			 *
-			 * When total metric (d_N) is equal, prefer the
-			 * path with lower inter-area metric.  Only merge
-			 * Adj_N when both total AND inter-area are equal.
-			 *
-			 * Uses area_proxy_metric_cmp() — swap to Phase 2
-			 * (inter-area primary) in that function only.
-			 */
-			int cmp = area_proxy_metric_cmp(
-				spftree,
-				vertex->d_N, vertex->d_inter,
-				dist, candidate_d_inter);
-			if (cmp < 0) {
-				/* Existing path better — ignore new.
-				 * Do NOT add to parents: not equivalent. */
-				return;
-			} else if (cmp > 0) {
-				/* New path better — replace existing vertex. */
-				isis_vertex_queue_delete(&spftree->tents, vertex);
-				hash_release(spftree->prefix_sids, vertex);
-				isis_vertex_del(vertex);
-				/* Fall through to add2tent below */
-			} else {
-				/* Both total and inter-area equal —
-				 * true ECMP, merge Adj_N. */
-				struct listnode *node;
-				struct isis_vertex_adj *parent_vadj;
 
-				for (ALL_LIST_ELEMENTS_RO(parent->Adj_N,
-							  node, parent_vadj))
-					if (!isis_vertex_adj_exists(
-						    spftree, vertex,
-						    parent_vadj->sadj)) {
-						bool last_hop =
-							(vertex->depth == 2);
+		/*
+		 * Area Proxy metric comparison:
+		 *
+		 * MODE_FLAT:  (d_N, d_inter) — total distance primary,
+		 *             inter-area secondary (tie-breaker).
+		 *
+		 * MODE_LAYERED: (d_inter, d_intra) — inter-area
+		 *             primary, intra-area secondary (RFC 9717).
+		 *
+		 * Delegates to area_proxy_metric_cmp() which selects
+		 * the mode based on spftree->use_layered_metric.
+		 */
+		int cmp = area_proxy_metric_cmp(
+			spftree,
+			vertex->d_N, vertex->d_inter,
+			dist, candidate_d_inter);
 
-						isis_vertex_adj_add(
-							spftree, vertex,
-							vertex->Adj_N,
-							parent_vadj->sadj,
-							psid, last_hop);
-					}
-				if (CHECK_FLAG(spftree->flags,
-					       F_SPFTREE_HOPCOUNT_METRIC))
-					vertex_update_firsthops(vertex, parent);
-				/*      2) */
-				if (!CHECK_FLAG(spftree->flags,
-						F_SPFTREE_NO_ADJACENCIES)
-				    && listcount(vertex->Adj_N) > ISIS_MAX_PATH_SPLITS)
-					remove_excess_adjs(vertex->Adj_N);
-				if (listnode_lookup(vertex->parents, parent) == NULL)
-					listnode_add(vertex->parents, parent);
-				return;
-			}
-			/* Falls through to add2tent only on replace */
-		} else if (vertex->d_N < dist) {
+		if (cmp < 0) {
+			/* Existing path is better — ignore new. */
 			return;
-			/*      4) */
+		} else if (cmp == 0) {
+			/* Metric tuple equal — true ECMP, merge Adj_N. */
+			struct listnode *node;
+			struct isis_vertex_adj *parent_vadj;
+
+			for (ALL_LIST_ELEMENTS_RO(parent->Adj_N,
+						  node, parent_vadj))
+				if (!isis_vertex_adj_exists(
+					    spftree, vertex,
+					    parent_vadj->sadj)) {
+					bool last_hop =
+						(vertex->depth == 2);
+
+					isis_vertex_adj_add(
+						spftree, vertex,
+						vertex->Adj_N,
+						parent_vadj->sadj,
+						psid, last_hop);
+				}
+			if (CHECK_FLAG(spftree->flags,
+				       F_SPFTREE_HOPCOUNT_METRIC))
+				vertex_update_firsthops(vertex, parent);
+			/*      2) */
+			if (!CHECK_FLAG(spftree->flags,
+					F_SPFTREE_NO_ADJACENCIES)
+			    && listcount(vertex->Adj_N)
+				       > ISIS_MAX_PATH_SPLITS)
+				remove_excess_adjs(vertex->Adj_N);
+			if (listnode_lookup(vertex->parents, parent)
+			    == NULL)
+				listnode_add(vertex->parents, parent);
+			return;
 		} else {
+			/* New path is better — replace existing vertex. */
 			isis_vertex_queue_delete(&spftree->tents, vertex);
 			hash_release(spftree->prefix_sids, vertex);
 			isis_vertex_del(vertex);
+			/* Fall through to add2tent below. */
 		}
 	}
 
@@ -2013,10 +2018,17 @@ void isis_run_spf(struct isis_spftree *spftree)
 	/*
 	 * Area Proxy layered metric: when enabled on an L2 SPF tree,
 	 * use (d_inter, d_intra) tuple for path comparison instead
-	 * of flat (d_N, d_inter).  Currently MODE_FLAT; set to true
-	 * to enable full RFC 9717 layered metric.
+	 * of flat (d_N, d_inter).  This enables full RFC 9717
+	 * layered metric semantics.
+	 *
+	 * Requires coordinated changes in:
+	 *   - isis_vertex_queue_tent_cmp (TENT ordering)
+	 *   - process_N() (PATHS assert, TENT comparison, ECMP, IP merge)
+	 *   - area_proxy_metric_cmp() (comparison logic)
 	 */
-	spftree->use_layered_metric = false;
+	spftree->use_layered_metric =
+		(spftree->area->area_proxy_enabled
+		 && spftree->level == ISIS_LEVEL2);
 
 	/*
 	 * C.2.5 Step 0
