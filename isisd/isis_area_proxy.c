@@ -1385,28 +1385,31 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 			}
 
 			ready = isis_area_proxy_ready(area);
-			if (!ready) {
+			bool first_attempt = (area->proxy_lsp[ISIS_LEVEL2 - 1] == NULL);
+			if (!ready && !first_attempt) {
 				zlog_info("Area Proxy: not ready in reconcile, deferring");
 				if (area->area_proxy_ready_count > 0)
 					area->ap_ready_changes++;
 				area->area_proxy_ready_count = 0;
 			} else {
-				area->area_proxy_ready_count++;
-				/* Initial generation: no debounce needed.
-				 * Subsequent regenerations: debounce=2 to
-				 * avoid flapping during SPF micro-convergence. */
-				bool initial = (area->proxy_lsp[ISIS_LEVEL2 - 1] == NULL);
-				uint32_t need = initial ? 1 : 2;
-				zlog_info("Area Proxy: ready=%u/%u (%s)", area->area_proxy_ready_count, need,
-					  initial ? "initial" : "debounced");
-				if (area->area_proxy_ready_count >= need) {
-					area_proxy_debug("Area Proxy: ready (%s, debounce %u) → generate",
-							initial ? "initial" : "debounced",
-							area->area_proxy_ready_count);
+				/* First attempt after enable: bypass ready check,
+				 * generate immediately. Subsequent regenerations
+				 * use debounce=2 against ready check. */
+				if (first_attempt) {
+					zlog_info("Area Proxy: first reconcile, generating directly");
 					isis_area_proxy_lsp_generate(area);
 					area->proxy_lsp_dirty = false;
 					area->area_proxy_last_gen_time = monotime(NULL);
 					area->area_proxy_ready_count = 0;
+				} else {
+					area->area_proxy_ready_count++;
+					if (area->area_proxy_ready_count >= 2) {
+						zlog_info("Area Proxy: ready debounced → generate");
+						isis_area_proxy_lsp_generate(area);
+						area->proxy_lsp_dirty = false;
+						area->area_proxy_last_gen_time = monotime(NULL);
+						area->area_proxy_ready_count = 0;
+					}
 				}
 			}
 		} else {
