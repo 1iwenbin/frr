@@ -1647,6 +1647,12 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 					isis_free_tlvs(frag->tlvs);
 					frag->tlvs = NULL;
 				}
+				/* Fragment may have been purged and
+				 * unlinked from lspu.frags in a previous
+				 * cycle (e.g. 3→2→3).  Re-link it so
+				 * flood/iteration sees this fragment. */
+				if (!listnode_lookup(lsp0->lspu.frags, frag))
+					listnode_add(lsp0->lspu.frags, frag);
 			} else {
 				frag_exists = false;
 				frag = lsp_new(area, lsp_id,
