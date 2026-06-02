@@ -844,14 +844,21 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 		assert(dist >= vertex->d_N);
 		/*
 		 * Equal-cost path arriving after vertex entered PATHS:
-		 * still merge Adj_N to avoid losing valid next-hops
-		 * (e.g. correct Proxy ring direction vs loop direction).
-		 * Downstream vertices already processed won't pick up
-		 * the new Adj_N in this SPF run, but the vertex's own
-		 * Adj_N is used directly in route installation for
-		 * IP prefix vertices.
+		 * merge Adj_N only for IP prefix vertices (VTYPE_IP).
+		 *
+		 * IP prefix vertices are not expanded to downstream
+		 * vertices; their Adj_N is used directly by the
+		 * post-SPF route installation (spf_path_process).
+		 * Late equal-cost merge here still affects the
+		 * current SPF run's route table.
+		 *
+		 * IS/Proxy vertices must NOT be merged in PATHS:
+		 * their downstream vertices were already processed
+		 * with the old Adj_N and won't pick up the change.
+		 * Those cases are handled by the TENT-phase
+		 * tie-breaker (d_inter comparison).
 		 */
-		if (dist == vertex->d_N) {
+		if (dist == vertex->d_N && VTYPE_IP(vertex->type)) {
 			struct listnode *node;
 			struct isis_vertex_adj *parent_vadj;
 
