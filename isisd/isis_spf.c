@@ -96,6 +96,49 @@ static bool isis_spf_sysid_is_proxy(const uint8_t *sysid)
 	return memcmp(sysid, prefix, sizeof(prefix)) == 0;
 }
 
+/*
+ * Area Proxy metric comparison — abstracted for evolvability
+ * toward full RFC 9717 layered metric.
+ *
+ * Phase 1 (current): flat SPF + inter-area tie-breaker
+ *   Compare (d_N, d_inter) — total distance first, inter-area second.
+ *
+ * Phase 2 (future): full layered metric
+ *   Compare (d_inter, d_N - d_inter) — inter-area first, intra-area second.
+ *
+ * Returns: <0 if (a_N, a_inter) is better (shorter)
+ *          >0 if (b_N, b_inter) is better
+ *          =0 if equal (true ECMP)
+ */
+static int area_proxy_metric_cmp(uint32_t a_dN, uint32_t a_dInter,
+				 uint32_t b_dN, uint32_t b_dInter)
+{
+	/* Phase 1: total distance primary, inter-area secondary */
+	if (a_dN != b_dN)
+		return (a_dN < b_dN) ? -1 : 1;
+	if (a_dInter != b_dInter)
+		return (a_dInter < b_dInter) ? -1 : 1;
+	return 0;
+	/*
+	 * Phase 2 (future):
+	 *   if (a_dInter != b_dInter)
+	 *       return (a_dInter < b_dInter) ? -1 : 1;
+	 *   uint32_t a_intra = a_dN - a_dInter;
+	 *   uint32_t b_intra = b_dN - b_dInter;
+	 *   ... compare intra ...
+	 */
+}
+
+/*
+ * Vertex ordering for TENT priority queue.
+ * Currently delegates to area_proxy_metric_cmp.
+ */
+static int isis_vertex_metric_cmp(const struct isis_vertex *a,
+				  const struct isis_vertex *b)
+{
+	return area_proxy_metric_cmp(a->d_N, a->d_inter, b->d_N, b->d_inter);
+}
+
 struct isis_spf_run {
 	struct isis_area *area;
 	int level;
@@ -819,29 +862,25 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 #endif /* EXTREME_DEBUG */
 		if (vertex->d_N == dist) {
 			/*
-			 * Area Proxy inter-area tie-breaker:
+			 * Area Proxy inter-area tie-breaker
+			 * (Phase 1 — evolvable toward full layered metric).
+			 *
 			 * When total metric (d_N) is equal, prefer the
-			 * path with lower inter-area metric.  Only
-			 * merge Adj_N for ECMP when BOTH total and
-			 * inter-area metrics are equal.
+			 * path with lower inter-area metric.  Only merge
+			 * Adj_N when both total AND inter-area are equal.
+			 *
+			 * Uses area_proxy_metric_cmp() — swap to Phase 2
+			 * (inter-area primary) in that function only.
 			 */
-			if (vertex->d_inter < candidate_d_inter) {
-				/* Existing path has less inter-area
-				 * cost — better path, ignore new.
-				 * Do NOT add to parents: this is not
-				 * an equivalent path. */
+			int cmp = area_proxy_metric_cmp(
+				vertex->d_N, vertex->d_inter,
+				dist, candidate_d_inter);
+			if (cmp < 0) {
+				/* Existing path better — ignore new.
+				 * Do NOT add to parents: not equivalent. */
 				return;
-			} else if (vertex->d_inter > candidate_d_inter) {
-				/* New path has less inter-area cost —
-				 * replace existing vertex. */
-#ifdef EXTREME_DEBUG
-				if (IS_DEBUG_SPF_EVENTS)
-					zlog_debug(
-						"ISIS-SPF: process_N %s equal dist %d but better inter-area %u < %u — replace",
-						print_sys_hostname(vertex->N.id),
-						dist, candidate_d_inter,
-						vertex->d_inter);
-#endif
+			} else if (cmp > 0) {
+				/* New path better — replace existing vertex. */
 				isis_vertex_queue_delete(&spftree->tents, vertex);
 				hash_release(spftree->prefix_sids, vertex);
 				isis_vertex_del(vertex);
