@@ -1637,6 +1637,12 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 				 * fragment 0.  Do NOT call lsp_inc_seqno()
 				 * here — it would diverge from frag 0. */
 				frag->hdr.seqno = new_seqno;
+				/* Reset lifetime: reused fragment must align
+				 * with fragment 0, otherwise stale holdtime
+				 * causes premature expiry. */
+				frag->hdr.rem_lifetime =
+					area->max_lsp_lifetime[ISIS_LEVEL2 - 1];
+				frag->age_out = ZERO_AGE_LIFETIME;
 				if (frag->tlvs) {
 					isis_free_tlvs(frag->tlvs);
 					frag->tlvs = NULL;
@@ -1695,13 +1701,14 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		     lnode; lnode = lnode_next) {
 			lnode_next = listnextnode(lnode);
 			flsp = listgetdata(lnode);
-			uint8_t pid = LSP_PSEUDO_ID(flsp->hdr.lsp_id);
+			uint8_t fid = LSP_FRAGMENT(flsp->hdr.lsp_id);
 
-			if (pid >= frag_count) {
-				zlog_info("Area Proxy: purging obsolete fragment %pLS (id=%d >= %d)",
-					  flsp->hdr.lsp_id, pid, frag_count);
+			if (fid >= (uint8_t)frag_count) {
+				zlog_info("Area Proxy: purging obsolete fragment %pLS (fid=%d >= %d)",
+					  flsp->hdr.lsp_id, fid, frag_count);
 				/* Send purge PDU to all neighbours */
 				flsp->hdr.rem_lifetime = 0;
+				flsp->age_out = ZERO_AGE_LIFETIME;
 				lsp_pack_pdu_ext(flsp);
 				lsp_flood(flsp, NULL);
 				/* Unlink from lspu.frags — the LSP stays in
