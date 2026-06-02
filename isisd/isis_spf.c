@@ -746,10 +746,23 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 
 	assert(spftree && parent);
 
-	/* RFC 9717: inter-area metric = parent's inter-area + this hop's
+	/* Area Proxy: inter-area metric = parent's inter-area + this hop's
 	 * inter-area portion (non-zero only for Proxy→Proxy links).
 	 */
 	candidate_d_inter = parent->d_inter + inter_metric;
+
+	/* Diagnostic: log Proxy vertex candidate distances for A=2
+	 * tie-breaker analysis — helps confirm whether candidate
+	 * d_N equals vertex d_N (tie-break hit) or differs (pollution). */
+	if (IS_DEBUG_SPF_EVENTS && spftree->area->area_proxy_enabled &&
+	    inter_metric > 0) {
+		zlog_debug(
+			"ISIS-SPF: process_N Proxy-hop target=%s candidate_d_N=%u candidate_d_inter=%u parent=%s parent_d_inter=%u",
+			VTYPE_IS(vtype) ? print_sys_hostname(id) : "prefix",
+			dist, candidate_d_inter,
+			print_sys_hostname(parent->N.id),
+			parent->d_inter);
+	}
 
 	if (CHECK_FLAG(spftree->flags, F_SPFTREE_HOPCOUNT_METRIC)
 	    && !VTYPE_IS(vtype))
@@ -806,7 +819,7 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 #endif /* EXTREME_DEBUG */
 		if (vertex->d_N == dist) {
 			/*
-			 * RFC 9717: composite distance comparison.
+			 * Area Proxy inter-area tie-breaker:
 			 * When total metric (d_N) is equal, prefer the
 			 * path with lower inter-area metric.  Only
 			 * merge Adj_N for ECMP when BOTH total and
