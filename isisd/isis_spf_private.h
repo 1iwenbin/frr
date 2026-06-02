@@ -337,6 +337,7 @@ struct isis_spftree {
 	int family;
 	int level;
 	enum spf_tree_id tree_id;
+	bool use_layered_metric; /* Area Proxy: use (d_inter, d_intra) tuple for SPF */
 	struct {
 		/* Original pre-failure local SPTs. */
 		struct {

@@ -100,43 +100,56 @@ static bool isis_spf_sysid_is_proxy(const uint8_t *sysid)
  * Area Proxy metric comparison — abstracted for evolvability
  * toward full RFC 9717 layered metric.
  *
- * Phase 1 (current): flat SPF + inter-area tie-breaker
+ * MODE_FLAT (current): flat SPF + inter-area tie-breaker
  *   Compare (d_N, d_inter) — total distance first, inter-area second.
  *
- * Phase 2 (future): full layered metric
+ * MODE_LAYERED (full RFC 9717): layered metric
  *   Compare (d_inter, d_N - d_inter) — inter-area first, intra-area second.
  *
- * Returns: <0 if (a_N, a_inter) is better (shorter)
- *          >0 if (b_N, b_inter) is better
+ * Mode is selected by spftree->use_layered_metric, set when
+ * area_proxy_enabled && level == ISIS_LEVEL2.
+ *
+ * To switch to MODE_LAYERED: change isis_run_spf() to set
+ * use_layered_metric = true when area_proxy_enabled && L2.
+ * No callers of this function need modification.
+ *
+ * Returns: <0 if a is better (shorter)
+ *          >0 if b is better
  *          =0 if equal (true ECMP)
  */
-static int area_proxy_metric_cmp(uint32_t a_dN, uint32_t a_dInter,
+static int area_proxy_metric_cmp(const struct isis_spftree *spftree,
+				 uint32_t a_dN, uint32_t a_dInter,
 				 uint32_t b_dN, uint32_t b_dInter)
 {
-	/* Phase 1: total distance primary, inter-area secondary */
-	if (a_dN != b_dN)
-		return (a_dN < b_dN) ? -1 : 1;
+	if (!spftree->use_layered_metric) {
+		/* MODE_FLAT: total distance primary, inter-area secondary */
+		if (a_dN != b_dN)
+			return (a_dN < b_dN) ? -1 : 1;
+		if (a_dInter != b_dInter)
+			return (a_dInter < b_dInter) ? -1 : 1;
+		return 0;
+	}
+
+	/* MODE_LAYERED: inter-area primary, intra-area secondary */
 	if (a_dInter != b_dInter)
 		return (a_dInter < b_dInter) ? -1 : 1;
+	uint32_t a_intra = a_dN - a_dInter;
+	uint32_t b_intra = b_dN - b_dInter;
+	if (a_intra != b_intra)
+		return (a_intra < b_intra) ? -1 : 1;
 	return 0;
-	/*
-	 * Phase 2 (future):
-	 *   if (a_dInter != b_dInter)
-	 *       return (a_dInter < b_dInter) ? -1 : 1;
-	 *   uint32_t a_intra = a_dN - a_dInter;
-	 *   uint32_t b_intra = b_dN - b_dInter;
-	 *   ... compare intra ...
-	 */
 }
 
 /*
  * Vertex ordering for TENT priority queue.
- * Currently delegates to area_proxy_metric_cmp.
+ * Delegates to area_proxy_metric_cmp with the spftree's mode.
  */
 static int isis_vertex_metric_cmp(const struct isis_vertex *a,
-				  const struct isis_vertex *b)
+				  const struct isis_vertex *b,
+				  const struct isis_spftree *spftree)
 {
-	return area_proxy_metric_cmp(a->d_N, a->d_inter, b->d_N, b->d_inter);
+	return area_proxy_metric_cmp(spftree, a->d_N, a->d_inter,
+				     b->d_N, b->d_inter);
 }
 
 struct isis_spf_run {
@@ -910,6 +923,7 @@ static void process_N(struct isis_spftree *spftree, enum vertextype vtype,
 			 * (inter-area primary) in that function only.
 			 */
 			int cmp = area_proxy_metric_cmp(
+				spftree,
 				vertex->d_N, vertex->d_inter,
 				dist, candidate_d_inter);
 			if (cmp < 0) {
@@ -1995,6 +2009,14 @@ void isis_run_spf(struct isis_spftree *spftree)
 			__func__);
 		exit(1);
 	}
+
+	/*
+	 * Area Proxy layered metric: when enabled on an L2 SPF tree,
+	 * use (d_inter, d_intra) tuple for path comparison instead
+	 * of flat (d_N, d_inter).  Currently MODE_FLAT; set to true
+	 * to enable full RFC 9717 layered metric.
+	 */
+	spftree->use_layered_metric = false;
 
 	/*
 	 * C.2.5 Step 0
