@@ -491,6 +491,11 @@ bool isis_spf_sysid_reachable(struct isis_area *area, const uint8_t *sysid)
 		return false;
 
 	tree = area->spftree[SPFTREE_IPV4][ISIS_LEVEL1 - 1];
+	if (!tree) {
+		/* IPv6-only deployments may not run IPv4 SPF;
+		 * fall back to the IPv6 SPF tree for L1 reachability. */
+		tree = area->spftree[SPFTREE_IPV6][ISIS_LEVEL1 - 1];
+	}
 	if (!tree)
 		return false;
 

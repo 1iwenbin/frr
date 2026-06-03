@@ -3456,6 +3456,23 @@ static void format_tlv_router_cap_json(const struct isis_router_cap *router_cap,
 			}
 	}
 
+	/* RFC 9667: Area Leader Priority (sub-TLV 27) */
+	if (router_cap->area_leader_priority > 0)
+		json_object_int_add(json, "area-leader-priority",
+				 router_cap->area_leader_priority);
+
+	/* RFC 9667: Area Proxy System Identifier (sub-TLV 28) */
+	if (router_cap->has_area_proxy_sysid) {
+		char proxy_sysid_str[32];
+		snprintf(proxy_sysid_str, sizeof(proxy_sysid_str),
+			 "%02x%02x.%02x%02x.%02x%02x",
+			 router_cap->proxy_sysid[0], router_cap->proxy_sysid[1],
+			 router_cap->proxy_sysid[2], router_cap->proxy_sysid[3],
+			 router_cap->proxy_sysid[4], router_cap->proxy_sysid[5]);
+		json_object_string_add(json, "area-proxy-system-id",
+					proxy_sysid_str);
+	}
+
 	/* Segment Routing Node MSD as per RFC8491 section #2 */
 	if (router_cap->msd != 0)
 		json_object_int_add(json, "msd", router_cap->msd);
