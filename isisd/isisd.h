@@ -271,6 +271,8 @@ struct isis_area {
 	uint64_t ap_leader_changes;            /* Leader 切换次数 */
 	uint64_t ap_filtered_lsp_count;         /* 被泛洪过滤的 LSP 数量 */
 	uint64_t ap_ready_changes;             /* Ready 状态变化次数 */
+	uint64_t ap_lsp_skip_nochange;         /* 内容未变化跳过 regenerate 次数 */
+	time_t ap_lsp_last_skip_time;          /* 最后一次 skip nochange 时间 */
 
 	QOBJ_FIELDS;
 };

@@ -373,9 +373,10 @@ void isis_area_proxy_show_ready(struct vty *vty, struct isis_area *area)
 	}
 	if (missing == 0)
 		vty_out(vty, "  (none)\n");
-	vty_out(vty, "\nCounters: gen=%llu leader_chg=%llu ready_chg=%llu filtered=%llu\n",
-		area->ap_lsp_gen_count, area->ap_leader_changes,
-		area->ap_ready_changes, area->ap_filtered_lsp_count);
+	vty_out(vty, "\nCounters: gen=%llu skip_nochange=%llu leader_chg=%llu ready_chg=%llu filtered=%llu\n",
+		area->ap_lsp_gen_count, area->ap_lsp_skip_nochange,
+		area->ap_leader_changes, area->ap_ready_changes,
+		area->ap_filtered_lsp_count);
 }
 
 /*
@@ -404,7 +405,8 @@ void isis_area_proxy_show_lsp(struct vty *vty, struct isis_area *area)
 		lsp->hdr.pdu_len, lsp->level);
 	vty_out(vty, "  Last generated: %llds ago\n",
 		(long long)(monotime(NULL) - area->area_proxy_last_gen_time));
-	vty_out(vty, "  Total generations: %llu\n", area->ap_lsp_gen_count);
+	vty_out(vty, "  Total generations: %llu (skipped nochange: %llu)\n",
+		area->ap_lsp_gen_count, area->ap_lsp_skip_nochange);
 
 	/* Show TLV summary */
 	if (lsp->tlvs) {
@@ -1467,6 +1469,140 @@ void isis_area_proxy_schedule_reconcile(struct isis_area *area, uint32_t reason)
 /* ── isis_lsp_is_proxy_lsp: 8.4 implementation (was in isis_lsp.c on 10.7) ── */
 
 /*
+ * Check whether an old Proxy LSP fragment is valid for content comparison.
+ * Purged, expired, or empty fragments must not participate in unchanged
+ * detection — they must trigger regeneration.
+ */
+static bool area_proxy_lsp_fragment_valid(struct isis_lsp *lsp)
+{
+	if (!lsp)
+		return false;
+	if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0)
+		return false;
+	if (lsp->hdr.pdu_len <= 27)  /* 27 = LLC(3) + common hdr(8) + LSP hdr(16): header-only, no TLV payload */
+		return false;
+	if (!lsp->tlvs)
+		return false;
+	return true;
+}
+
+/*
+ * Free a fragment list produced by isis_fragment_tlvs(),
+ * releasing each fragment's TLV data.
+ */
+static void area_proxy_fragment_list_free(struct list *fragments)
+{
+	struct listnode *node, *nnode;
+	struct isis_tlvs *frag_tlvs;
+
+	if (!fragments)
+		return;
+
+	for (ALL_LIST_ELEMENTS(fragments, node, nnode, frag_tlvs)) {
+		isis_free_tlvs(frag_tlvs);
+		list_delete_node(fragments, node);
+	}
+	list_delete(&fragments);
+}
+
+/*
+ * Serialize a single fragment's TLVs into a fresh stream, then
+ * compare with an existing LSP fragment's serialized TLV payload.
+ *
+ * Returns true if the TLV content is identical, false otherwise.
+ * Pack failures are treated as "changed" (conservative).
+ */
+static bool area_proxy_fragment_tlv_equal(struct isis_area *area,
+					  struct isis_tlvs *new_tlvs,
+					  struct isis_lsp *old_frag)
+{
+	struct stream *new_s, *old_s;
+	size_t new_len, old_len;
+	bool result = false;
+	size_t stream_size;
+
+	if (!area_proxy_lsp_fragment_valid(old_frag))
+		return false;
+
+	/* Use area lsp_mtu with margin for serialization buffer */
+	stream_size = area->lsp_mtu ? area->lsp_mtu : DEFAULT_LSP_MTU;
+
+	new_s = stream_new(stream_size);
+	old_s = stream_new(stream_size);
+
+	/* Pack failures → conservative: treat as changed */
+	if (isis_pack_tlvs(new_tlvs, new_s, (size_t)-1, false, true) != 0)
+		goto out;
+	if (isis_pack_tlvs(old_frag->tlvs, old_s, (size_t)-1, false, true) != 0)
+		goto out;
+
+	new_len = stream_get_endp(new_s);
+	old_len = stream_get_endp(old_s);
+
+	if (new_len == old_len)
+		result = (memcmp(STREAM_DATA(new_s), STREAM_DATA(old_s),
+				 new_len) == 0);
+
+out:
+	stream_free(new_s);
+	stream_free(old_s);
+	return result;
+}
+
+/*
+ * Compare newly aggregated+ fragmented TLVs with the existing
+ * Proxy LSP fragments already in the LSDB.
+ *
+ * Returns true if all fragments have identical TLV content
+ * (no regeneration needed), false if any fragment changed
+ * or any old fragment is invalid.
+ */
+static bool area_proxy_lsp_content_unchanged(struct isis_area *area,
+					     struct list *new_fragments)
+{
+	struct isis_lsp *lsp0 = area->proxy_lsp[ISIS_LEVEL2 - 1];
+	struct listnode *node;
+	struct isis_tlvs *new_frag_tlvs;
+	uint8_t lsp_id[ISIS_SYS_ID_LEN + 2];
+	int old_frag_count, new_frag_count;
+	int idx = 0;
+
+	if (!lsp0)
+		return false;  /* first generation */
+
+	/* Compare fragment count */
+	new_frag_count = listcount(new_fragments);
+	old_frag_count = 1;  /* fragment 0 */
+	if (lsp0->lspu.frags)
+		old_frag_count += listcount(lsp0->lspu.frags);
+
+	if (new_frag_count != old_frag_count)
+		return false;
+
+	/* Build base LSP ID for fragment lookup */
+	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
+	lsp_id[ISIS_SYS_ID_LEN] = 0; /* pseudo ID */
+
+	for (ALL_LIST_ELEMENTS_RO(new_fragments, node, new_frag_tlvs)) {
+		struct isis_lsp *old_frag;
+
+		if (idx == 0) {
+			old_frag = lsp0;
+		} else {
+			lsp_id[ISIS_SYS_ID_LEN + 1] = idx;
+			old_frag = lsp_search(
+				&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
+		}
+
+		if (!area_proxy_fragment_tlv_equal(area, new_frag_tlvs, old_frag))
+			return false;
+
+		idx++;
+	}
+	return true;
+}
+
+/*
  * Generate (or regenerate) the Proxy LSP from aggregated TLVs,
  * then flood it to all L2 neighbors.
  *
@@ -1525,6 +1661,34 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		return -1;
 	}
 
+	/* --- Calculate available TLV space and fragment ---
+	 * Must happen before seqno bump to allow content comparison. */
+	{
+		size_t tlv_space = area->lsp_mtu - 23 - 4;
+		fragments = isis_fragment_tlvs(tlvs, tlv_space);
+	}
+	isis_free_tlvs(tlvs);
+	if (!fragments) {
+		zlog_warn("Area Proxy: isis_fragment_tlvs returned NULL");
+		area->ap_reconcile_running = false;
+		return -1;
+	}
+
+	/* --- Content-change guard ---
+	 * If the aggregated content is identical to the existing
+	 * Proxy LSP, skip regeneration: do not bump seqno, do not
+	 * flood, do not trigger L2 SPF. */
+	if (area->proxy_lsp[ISIS_LEVEL2 - 1] &&
+	    area_proxy_lsp_content_unchanged(area, fragments)) {
+		zlog_debug("Area Proxy: content unchanged, skip regenerate");
+		area_proxy_fragment_list_free(fragments);
+		area->proxy_lsp_dirty = false;
+		area->ap_lsp_skip_nochange++;
+		area->ap_lsp_last_skip_time = monotime(NULL);
+		area->ap_reconcile_running = false;
+		return 0;
+	}
+
 	/* Build LSP ID: proxy_sysid + pseudo_id=0 */
 	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
 	lsp_id[ISIS_SYS_ID_LEN] = 0; /* pseudo ID */
@@ -1547,29 +1711,12 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 			       IS_LEVEL_1_AND_2,
 			       0, NULL, ISIS_LEVEL2);
 		if (!lsp0) {
-			isis_free_tlvs(tlvs);
+			area_proxy_fragment_list_free(fragments);
 			area->ap_reconcile_running = false;
 			return -1;
 		}
 		lsp0->own_lsp = 0;
 		area->proxy_lsp[ISIS_LEVEL2 - 1] = lsp0;
-	}
-
-	/* --- Calculate available TLV space --- */
-	{
-		/* tlv_space: max bytes for TLVs within the LSP PDU.
-		 * IS-IS overhead: LLC (3) + common hdr (8) + LSP hdr (12) = 23.
-		 * Subtract extra 4 for safety margin (auth, padding). */
-		size_t tlv_space = area->lsp_mtu - 23 - 4;
-
-		/* --- Fragment TLVs --- */
-		fragments = isis_fragment_tlvs(tlvs, tlv_space);
-	}
-	isis_free_tlvs(tlvs);
-	if (!fragments) {
-		zlog_warn("Area Proxy: isis_fragment_tlvs returned NULL");
-		area->ap_reconcile_running = false;
-		return -1;
 	}
 
 	/* --- Assign fragmented TLVs to LSPs, link via lspu.frags ---
