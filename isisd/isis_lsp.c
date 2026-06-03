@@ -1086,11 +1086,22 @@ static void lsp_build(struct isis_lsp *lsp, struct isis_area *area)
 			  area->area_tag);
 	}
 
-	/* Add Router Capability TLV. */
-	if (area->isis->router_id != 0) {
+	/* Add Router Capability TLV.
+	 * The Router Capability TLV is emitted in two cases:
+	 *   1. router_id != 0 — full TLV with router ID, SR, and
+	 *      Area Proxy sub-TLVs (standard IPv4-enabled case).
+	 *   2. router_id == 0 && area_proxy_enabled — bare TLV
+	 *      containing only Area Proxy sub-TLVs.  In IPv6-only
+	 *      deployments zebra may never assign a non-zero IPv4
+	 *      router ID, but the Area Proxy election TLVs (sub-TLV
+	 *      27, 28) must be present in the LSP for Leader
+	 *      Election to function.
+	 */
+	if (area->isis->router_id != 0 || area->area_proxy_enabled) {
 		struct isis_router_cap cap = {};
 
-		cap.router_id.s_addr = area->isis->router_id;
+		if (area->isis->router_id != 0) {
+			cap.router_id.s_addr = area->isis->router_id;
 
 		/* Add SR Sub-TLVs if SR is enabled. */
 		if (area->srdb.enabled) {
@@ -1119,6 +1130,7 @@ static void lsp_build(struct isis_lsp *lsp, struct isis_area *area)
 			/* Disable SR Algorithm */
 			cap.algo[0] = SR_ALGORITHM_UNSET;
 			cap.algo[1] = SR_ALGORITHM_UNSET;
+			}
 		}
 
 		/* RFC 9667: Area Leader priority.
