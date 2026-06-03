@@ -28,6 +28,7 @@ static bool am_i_leader(struct isis_area *area);
 static bool isis_area_proxy_ready(struct isis_area *area);
 static void isis_area_proxy_lsp_purge(struct isis_area *area);
 static void isis_area_proxy_reconcile_cb(struct thread *t);
+static bool area_proxy_lsp_fragment_valid(struct isis_lsp *lsp);
 
 void isis_area_proxy_enable(struct isis_area *area)
 {
@@ -170,7 +171,21 @@ void isis_area_proxy_show(struct vty *vty, const struct isis_area *area)
 		if (area->area_proxy_leader_election) {
 			vty_out(vty, "  Mode: leader-election\n");
 			bool i_am = am_i_leader(area);
-			bool has_proxy = (area->proxy_lsp[ISIS_LEVEL2 - 1] != NULL);
+			/* Verify fragment 0 is actually in LSDB, not just
+			 * area->proxy_lsp pointer (may be stale after
+			 * external purge). */
+			bool has_proxy = false;
+			if (area->proxy_lsp[ISIS_LEVEL2 - 1]) {
+				uint8_t fid[ISIS_SYS_ID_LEN + 2];
+				memcpy(fid, area->area_proxy_sysid,
+				       ISIS_SYS_ID_LEN);
+				fid[ISIS_SYS_ID_LEN] = 0;
+				struct isis_lsp *flsp = lsp_search(
+					&area->lspdb[ISIS_LEVEL2 - 1], fid);
+				has_proxy = (flsp != NULL &&
+					     flsp == area->proxy_lsp[ISIS_LEVEL2 - 1] &&
+					     area_proxy_lsp_fragment_valid(flsp));
+			}
 			vty_out(vty, "  Role: %s\n", i_am ? "LEADER" : "FOLLOWER");
 			vty_out(vty, "  Priority: %u\n", area->area_proxy_leader_priority);
 			vty_out(vty, "  Election check interval: %us\n",
@@ -1553,9 +1568,14 @@ out:
  * Compare newly aggregated+ fragmented TLVs with the existing
  * Proxy LSP fragments already in the LSDB.
  *
+ * Precondition: the entire existing Proxy LSP fragment set
+ * must be complete and valid in the LSDB.  If fragment 0 is
+ * missing or invalid, returns false immediately (force
+ * regeneration) regardless of content comparison.
+ *
  * Returns true if all fragments have identical TLV content
- * (no regeneration needed), false if any fragment changed
- * or any old fragment is invalid.
+ * (no regeneration needed), false if any fragment changed,
+ * missing, or invalid.
  */
 static bool area_proxy_lsp_content_unchanged(struct isis_area *area,
 					     struct list *new_fragments)
@@ -1570,6 +1590,20 @@ static bool area_proxy_lsp_content_unchanged(struct isis_area *area,
 	if (!lsp0)
 		return false;  /* first generation */
 
+	/* Build base LSP ID for fragment lookup */
+	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
+	lsp_id[ISIS_SYS_ID_LEN] = 0; /* pseudo ID */
+
+	/* MUST: fragment 0 must exist in LSDB and match the pointer */
+	{
+		struct isis_lsp *db_lsp0 = lsp_search(
+			&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
+		if (!db_lsp0 || db_lsp0 != lsp0)
+			return false;
+		if (!area_proxy_lsp_fragment_valid(db_lsp0))
+			return false;
+	}
+
 	/* Compare fragment count */
 	new_frag_count = listcount(new_fragments);
 	old_frag_count = 1;  /* fragment 0 */
@@ -1578,10 +1612,6 @@ static bool area_proxy_lsp_content_unchanged(struct isis_area *area,
 
 	if (new_frag_count != old_frag_count)
 		return false;
-
-	/* Build base LSP ID for fragment lookup */
-	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
-	lsp_id[ISIS_SYS_ID_LEN] = 0; /* pseudo ID */
 
 	for (ALL_LIST_ELEMENTS_RO(new_fragments, node, new_frag_tlvs)) {
 		struct isis_lsp *old_frag;
@@ -1676,17 +1706,28 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 
 	/* --- Content-change guard ---
 	 * If the aggregated content is identical to the existing
-	 * Proxy LSP, skip regeneration: do not bump seqno, do not
-	 * flood, do not trigger L2 SPF. */
+	 * Proxy LSP and the LSP set is complete in the LSDB, skip
+	 * regeneration: do not bump seqno, do not flood, do not
+	 * trigger L2 SPF.
+	 *
+	 * Exception: if rem_lifetime < lsp_refresh, allow normal
+	 * regenerate to refresh the lifetime.  Proxy LSPs have no
+	 * independent refresh timer. */
 	if (area->proxy_lsp[ISIS_LEVEL2 - 1] &&
 	    area_proxy_lsp_content_unchanged(area, fragments)) {
-		zlog_debug("Area Proxy: content unchanged, skip regenerate");
-		area_proxy_fragment_list_free(fragments);
-		area->proxy_lsp_dirty = false;
-		area->ap_lsp_skip_nochange++;
-		area->ap_lsp_last_skip_time = monotime(NULL);
-		area->ap_reconcile_running = false;
-		return 0;
+		lsp0 = area->proxy_lsp[ISIS_LEVEL2 - 1];
+		if (lsp0->hdr.rem_lifetime >=
+		    area->lsp_refresh[ISIS_LEVEL2 - 1]) {
+			zlog_debug("Area Proxy: content unchanged, skip regenerate");
+			area_proxy_fragment_list_free(fragments);
+			area->proxy_lsp_dirty = false;
+			area->ap_lsp_skip_nochange++;
+			area->ap_lsp_last_skip_time = monotime(NULL);
+			area->ap_reconcile_running = false;
+			return 0;
+		}
+		zlog_debug("Area Proxy: content unchanged but lifetime low (%us), regenerating for refresh",
+			   lsp0->hdr.rem_lifetime);
 	}
 
 	/* Build LSP ID: proxy_sysid + pseudo_id=0 */
@@ -1702,6 +1743,14 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 			isis_free_tlvs(lsp0->tlvs);
 			lsp0->tlvs = NULL;
 		}
+		/* Reset lifetime: fragment 0 does not go through
+		 * the explicit rem_lifetime reset that fragments
+		 * 1+ receive below.  Without this, fragment 0's
+		 * lifetime drifts toward zero across regenerations
+		 * and eventually expires before fragments 1+. */
+		lsp0->hdr.rem_lifetime =
+			area->max_lsp_lifetime[ISIS_LEVEL2 - 1];
+		lsp0->age_out = ZERO_AGE_LIFETIME;
 		new_seqno = lsp0->hdr.seqno;
 	} else {
 		new_seqno = 1;
@@ -1721,7 +1770,8 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 
 	/* --- Assign fragmented TLVs to LSPs, link via lspu.frags ---
 	 *
-	 * Fragment 0: reused if already in area->proxy_lsp[L2-1] (frag0_reused).
+	 * Fragment 0: reused if already in area->proxy_lsp[L2-1] and
+	 * verified present in LSDB (not externally purged).
 	 * Fragment 1+: searched in LSDB by LSP ID; reused in-place if found.
 	 * Any reused fragment skips lsp_insert() to avoid lsp_destroy + UAF. */
 	bool frag0_reused = (area->proxy_lsp[ISIS_LEVEL2 - 1] == lsp0 &&
@@ -1731,9 +1781,13 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		bool frag_exists;
 
 		if (frag_count == 0) {
-			/* fragment 0 — use the pre-created lsp0 */
+			/* fragment 0 — use the pre-created lsp0.
+			 * MUST verify it is actually in the LSDB;
+			 * external purge may have removed it. */
 			frag = lsp0;
-			frag_exists = frag0_reused;
+			frag_exists = (frag0_reused &&
+				       lsp_search(&area->lspdb[ISIS_LEVEL2 - 1],
+						  lsp_id) == lsp0);
 		} else {
 			lsp_id[ISIS_SYS_ID_LEN + 1] = frag_count;
 			/* Search LSDB for existing fragment — reuse in-place
