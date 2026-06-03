@@ -490,20 +490,21 @@ bool isis_spf_sysid_reachable(struct isis_area *area, const uint8_t *sysid)
 	if (!area || !sysid)
 		return false;
 
-	tree = area->spftree[SPFTREE_IPV4][ISIS_LEVEL1 - 1];
-	if (!tree) {
-		/* IPv6-only deployments may not run IPv4 SPF;
-		 * fall back to the IPv6 SPF tree for L1 reachability. */
-		tree = area->spftree[SPFTREE_IPV6][ISIS_LEVEL1 - 1];
-	}
-	if (!tree)
-		return false;
-
-	for (ALL_QUEUE_ELEMENTS_RO(&tree->paths, node, v)) {
-		if ((v->type == VTYPE_NONPSEUDO_IS ||
-		     v->type == VTYPE_NONPSEUDO_TE_IS) &&
-		    memcmp(v->N.id, sysid, ISIS_SYS_ID_LEN) == 0)
-			return true;
+	/* Check both IPv4 and IPv6 SPF trees.  In IPv6-only
+	 * deployments the IPv4 tree may be initialized but contain
+	 * only the local node (no IPv4-speaking neighbors), while
+	 * the IPv6 tree has the full L1 topology.  Checking both
+	 * ensures correct reachability regardless of address family. */
+	for (int t = SPFTREE_IPV4; t <= SPFTREE_IPV6; t++) {
+		tree = area->spftree[t][ISIS_LEVEL1 - 1];
+		if (!tree)
+			continue;
+		for (ALL_QUEUE_ELEMENTS_RO(&tree->paths, node, v)) {
+			if ((v->type == VTYPE_NONPSEUDO_IS ||
+			     v->type == VTYPE_NONPSEUDO_TE_IS) &&
+			    memcmp(v->N.id, sysid, ISIS_SYS_ID_LEN) == 0)
+				return true;
+		}
 	}
 	return false;
 }

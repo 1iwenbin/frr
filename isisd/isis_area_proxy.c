@@ -253,34 +253,7 @@ void isis_area_proxy_show_election(struct vty *vty, struct isis_area *area)
 		if (is_own) {
 			reachable = true;
 		} else {
-			struct isis_circuit *circuit;
-			struct listnode *cnode;
-			for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
-				if ((circuit->is_type & IS_LEVEL_1) == 0)
-					continue;
-				struct listnode *anode;
-				struct isis_adjacency *adj;
-				if (circuit->circ_type == CIRCUIT_T_BROADCAST) {
-					for (ALL_LIST_ELEMENTS_RO(
-						     circuit->u.bc.adjdb[ISIS_LEVEL1 - 1],
-						     anode, adj)) {
-						if (adj->adj_state == ISIS_ADJ_UP &&
-						    memcmp(adj->sysid, lsp->hdr.lsp_id,
-							   ISIS_SYS_ID_LEN) == 0) {
-							reachable = true;
-							break;
-						}
-					}
-				} else if (circuit->circ_type == CIRCUIT_T_P2P &&
-					   circuit->u.p2p.neighbor &&
-					   circuit->u.p2p.neighbor->adj_state == ISIS_ADJ_UP &&
-					   memcmp(circuit->u.p2p.neighbor->sysid,
-						  lsp->hdr.lsp_id, ISIS_SYS_ID_LEN) == 0) {
-					reachable = true;
-				}
-				if (reachable)
-					break;
-			}
+			reachable = isis_spf_sysid_reachable(area, lsp->hdr.lsp_id);
 		}
 
 		if (priority == 0 && !is_own)
@@ -327,18 +300,7 @@ void isis_area_proxy_show_election(struct vty *vty, struct isis_area *area)
 			if (isis_lsp_is_proxy_lsp(lsp)) continue;
 			if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0) continue;
 			if (!own) {
-				bool r = false;
-				struct isis_circuit *c;
-				struct listnode *cn;
-		for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cn, c)) {
-					if ((c->is_type & IS_LEVEL_1) == 0) continue;
-					if (c->circ_type == CIRCUIT_T_P2P && c->u.p2p.neighbor &&
-					    c->u.p2p.neighbor->adj_state == ISIS_ADJ_UP &&
-					    memcmp(c->u.p2p.neighbor->sysid, lsp->hdr.lsp_id,
-						   ISIS_SYS_ID_LEN) == 0)
-					{ r = true; break; }
-				}
-				if (!r) continue;
+				if (!isis_spf_sysid_reachable(area, lsp->hdr.lsp_id)) continue;
 			}
 			if (own) p = area->area_proxy_leader_priority;
 			else if (lsp->tlvs && lsp->tlvs->router_cap)
