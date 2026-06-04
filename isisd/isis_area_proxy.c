@@ -418,8 +418,11 @@ void isis_area_proxy_show_lsp(struct vty *vty, struct isis_area *area)
 		lsp->hdr.seqno, lsp->hdr.checksum, lsp->hdr.rem_lifetime);
 	vty_out(vty, "  PDU Length: %u  Level: %d\n",
 		lsp->hdr.pdu_len, lsp->level);
-	vty_out(vty, "  Last generated: %llds ago\n",
-		(long long)(monotime(NULL) - area->area_proxy_last_gen_time));
+	if (area->area_proxy_last_gen_time == 0)
+		vty_out(vty, "  Last generated: never\n");
+	else
+		vty_out(vty, "  Last generated: %llds ago\n",
+			(long long)(monotime(NULL) - area->area_proxy_last_gen_time));
 	vty_out(vty, "  Total generations: %llu (skipped nochange: %llu)\n",
 		area->ap_lsp_gen_count, area->ap_lsp_skip_nochange);
 
@@ -670,8 +673,16 @@ static int proxy_aggregate_ip_reach_cb(const struct prefix *prefix,
 	struct prefix_agg_entry *e = prefix_agg_lookup(tbl, &pfx_normalised);
 	if (!e) {
 		e = prefix_agg_add(tbl, &pfx_normalised);
-		if (!e)
-			return LSP_ITER_STOP;
+		if (!e) {
+			static bool warned = false;
+			if (!warned) {
+				zlog_warn("Area Proxy: prefix aggregation table full (%d entries), "
+					  "further prefixes will be dropped",
+					  PREFIX_AGG_MAX);
+				warned = true;
+			}
+			return LSP_ITER_CONTINUE;
+		}
 	}
 
 	if (!e->has_min || metric < e->min_metric) {
@@ -905,160 +916,6 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 	 * ================================================================ */
 
 	return proxy_tlvs;
-}
-
-/* ────────────────────────────────────────────
- * L1 SPF Reachable Set (BFS on L1 adjacency graph)
- *
- * Builds the set of sysids reachable from this router via the L1
- * adjacency graph.  This is the L1 SPF reachable set — NOT just
- * direct L1 neighbors — and is the correct basis for area-wide
- * Leader Election (RFC 9667 §4.1).
- *
- * Algorithm: BFS starting from our own sysid.
- *   - Our own L1 adjacencies provide the initial frontier.
- *   - For each remote sysid, its L1 LSP IS Reachability TLVs
- *     (both old-style and extended) provide the next frontier.
- *   - Max depth: 64 (way more than needed for any L1 area).
- * ──────────────────────────────────────────── */
-
-#define L1_BFS_MAX_DEPTH 64
-
-struct l1_bfs_ctx {
-	struct list *visited;
-	struct list *queue;
-	int depth;
-};
-
-static bool l1_bfs_is_visited(struct list *visited, const uint8_t *sysid)
-{
-	struct listnode *node;
-	for (ALL_LIST_ELEMENTS_RO(visited, node, node)) {
-		uint8_t *v = listgetdata(node);
-		if (memcmp(v, sysid, ISIS_SYS_ID_LEN) == 0)
-			return true;
-	}
-	return false;
-}
-
-/* BFS callback: add unvisited neighbor to visited set + queue */
-static int l1_bfs_cb(const uint8_t *id, uint32_t metric, bool oldmetric,
-		     struct isis_ext_subtlvs *subtlvs, void *arg)
-{
-	struct l1_bfs_ctx *ctx = (struct l1_bfs_ctx *)arg;
-	(void)metric; (void)oldmetric; (void)subtlvs;
-
-	/* Hard stop: max 36 nodes (6×6 grid) + safety margin */
-	if (ctx->depth++ > 50)
-		return LSP_ITER_STOP;
-
-	if (l1_bfs_is_visited(ctx->visited, id))
-		return LSP_ITER_CONTINUE;
-
-	uint8_t *neighbor = XMALLOC(MTYPE_TMP, ISIS_SYS_ID_LEN);
-	memcpy(neighbor, id, ISIS_SYS_ID_LEN);
-	listnode_add(ctx->visited, neighbor);
-	listnode_add(ctx->queue, neighbor);
-
-	return LSP_ITER_CONTINUE;
-}
-
-/*
- * Build the L1 SPF reachable set — all sysids reachable from this
- * router through the L1 adjacency graph (BFS).
- *
- * Caller must free: iterate list, XFREE each element, list_delete().
- */
-static struct list *isis_l1_spf_reachable_set(struct isis_area *area)
-{
-	/*
-	 * Two-hop BFS on L1 adjacency graph.
-	 * Step 1: direct L1 neighbors → queue
-	 * Step 2: each neighbor's L1 LSP IS Reachability → visited
-	 *
-	 * Covers R12→R22→R21 (two hops) — sufficient for 3×3 area grids.
-	 * lsp_search() reads 8 bytes, pad sysid→lsp_id with \0\0.
-	 */
-	struct list *visited = list_new();
-	struct list *queue = list_new();
-	struct l1_bfs_ctx ctx = { .visited = visited, .queue = queue, .depth = 0 };
-
-	/* Seed */
-	uint8_t *self = XMALLOC(MTYPE_TMP, ISIS_SYS_ID_LEN);
-	memcpy(self, area->isis->sysid, ISIS_SYS_ID_LEN);
-	listnode_add(visited, self);
-
-	/* Step 1: direct L1 adjacencies */
-	if (area->circuit_list) {
-		struct isis_circuit *circuit;
-		struct listnode *cnode;
-		for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
-			if ((circuit->is_type & IS_LEVEL_1) == 0) continue;
-			struct listnode *anode;
-			struct isis_adjacency *adj;
-			if (circuit->circ_type == CIRCUIT_T_BROADCAST) {
-				struct list *adjdb = circuit->u.bc.adjdb[ISIS_LEVEL1 - 1];
-				if (!adjdb) continue;
-				for (ALL_LIST_ELEMENTS_RO(adjdb, anode, adj)) {
-					if (adj->adj_state != ISIS_ADJ_UP) continue;
-					if (l1_bfs_is_visited(visited, adj->sysid)) continue;
-					uint8_t *n = XMALLOC(MTYPE_TMP, ISIS_SYS_ID_LEN);
-					memcpy(n, adj->sysid, ISIS_SYS_ID_LEN);
-					listnode_add(visited, n);
-					listnode_add(queue, n);
-				}
-			} else if (circuit->circ_type == CIRCUIT_T_P2P && circuit->u.p2p.neighbor &&
-				   circuit->u.p2p.neighbor->adj_state == ISIS_ADJ_UP) {
-				const uint8_t *nsysid = circuit->u.p2p.neighbor->sysid;
-				if (!l1_bfs_is_visited(visited, nsysid)) {
-					uint8_t *n = XMALLOC(MTYPE_TMP, ISIS_SYS_ID_LEN);
-					memcpy(n, nsysid, ISIS_SYS_ID_LEN);
-					listnode_add(visited, n);
-					listnode_add(queue, n);
-				}
-			}
-		}
-	}
-
-	/* Step 2: each neighbor's L1 LSP for two-hop reachability */
-	{
-		struct listnode *qn;
-		for (ALL_LIST_ELEMENTS_RO(queue, qn, qn)) {
-			uint8_t *nsysid = listgetdata(qn);
-			uint8_t lsp_id[ISIS_SYS_ID_LEN + 2];
-			memcpy(lsp_id, nsysid, ISIS_SYS_ID_LEN);
-			lsp_id[ISIS_SYS_ID_LEN] = 0;
-			lsp_id[ISIS_SYS_ID_LEN + 1] = 0;
-			struct isis_lsp *lsp = lsp_search(&area->lspdb[ISIS_LEVEL1 - 1], lsp_id);
-			if (lsp && lsp->hdr.rem_lifetime && lsp->hdr.seqno && lsp->tlvs)
-				isis_lsp_iterate_is_reach(lsp, ISIS_MT_IPV4_UNICAST, l1_bfs_cb, &ctx);
-		}
-	}
-
-	/* Cleanup queue shell */
-	while (listhead(queue)) {
-		struct listnode *qn = listhead(queue);
-		listnode_delete(queue, qn);
-	}
-	list_delete(&queue);
-	return visited;
-}
-
-static void l1_spf_reachable_set_free(struct list *reachable)
-{
-	if (!reachable)
-		return;
-	struct listnode *node, *nnode;
-	for (ALL_LIST_ELEMENTS(reachable, node, nnode, node)) {
-		uint8_t *sysid = listgetdata(node);
-		XFREE(MTYPE_TMP, sysid);
-	}
-	list_delete(&reachable);
-}
-
-static bool sysid_in_list(struct list *list, const uint8_t *sysid)
-{
-	return l1_bfs_is_visited(list, sysid);
 }
 
 /* ────────────────────────────────────────────
@@ -1402,6 +1259,7 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 				zlog_info("Area Proxy: stepped down as LEADER");
 				area->ap_leader_changes++;
 				area->area_proxy_last_gen_time = 0;
+				area->proxy_lsp[ISIS_LEVEL2 - 1] = NULL;
 			}
 		}
 	} else {
@@ -1738,7 +1596,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	 * In-place update prevents purge flood to receivers. */
 	lsp0 = area->proxy_lsp[ISIS_LEVEL2 - 1];
 	if (lsp0) {
-		lsp_inc_seqno(lsp0, lsp0->hdr.seqno);
+		lsp_inc_seqno(lsp0, 0);
 		if (lsp0->tlvs) {
 			isis_free_tlvs(lsp0->tlvs);
 			lsp0->tlvs = NULL;
@@ -1753,18 +1611,38 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		lsp0->age_out = ZERO_AGE_LIFETIME;
 		new_seqno = lsp0->hdr.seqno;
 	} else {
-		new_seqno = 1;
-		lsp0 = lsp_new(area, lsp_id,
-			       area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
-			       new_seqno,
-			       IS_LEVEL_1_AND_2,
-			       0, NULL, ISIS_LEVEL2);
-		if (!lsp0) {
-			area_proxy_fragment_list_free(fragments);
-			area->ap_reconcile_running = false;
-			return -1;
+		/* Search LSDB for existing Proxy LSP from previous leader;
+		 * if found, reuse it in-place to continue from the right
+		 * seqno.  Otherwise start fresh with seqno=1. */
+		struct isis_lsp *existing = lsp_search(
+			&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
+		if (existing && existing->hdr.seqno != 0
+		    && existing->hdr.rem_lifetime != 0) {
+			lsp0 = existing;
+			lsp0->own_lsp = 0;
+			new_seqno = lsp0->hdr.seqno + 1;
+			lsp0->hdr.seqno = new_seqno;
+			if (lsp0->tlvs) {
+				isis_free_tlvs(lsp0->tlvs);
+				lsp0->tlvs = NULL;
+			}
+			lsp0->hdr.rem_lifetime =
+				area->max_lsp_lifetime[ISIS_LEVEL2 - 1];
+			lsp0->age_out = ZERO_AGE_LIFETIME;
+		} else {
+			new_seqno = 1;
+			lsp0 = lsp_new(area, lsp_id,
+				       area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
+				       new_seqno,
+				       IS_LEVEL_1_AND_2,
+				       0, NULL, ISIS_LEVEL2);
+			if (!lsp0) {
+				area_proxy_fragment_list_free(fragments);
+				area->ap_reconcile_running = false;
+				return -1;
+			}
+			lsp0->own_lsp = 0;
 		}
-		lsp0->own_lsp = 0;
 		area->proxy_lsp[ISIS_LEVEL2 - 1] = lsp0;
 	}
 
@@ -2048,7 +1926,7 @@ bool isis_area_proxy_lsp_should_flood(const struct isis_lsp *lsp,
 /* ── 8.4: Router Capability init for Area Proxy Step 4 ── */
 struct isis_router_cap *isis_tlvs_init_router_capability(struct isis_tlvs *tlvs)
 {
-	tlvs->router_cap = calloc(1, sizeof(struct isis_router_cap));
+	tlvs->router_cap = XCALLOC(MTYPE_TMP, sizeof(struct isis_router_cap));
 	if (tlvs->router_cap)
 		tlvs->router_cap->router_id.s_addr = INADDR_ANY;
 	return tlvs->router_cap;

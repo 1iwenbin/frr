@@ -1905,20 +1905,6 @@ static void put_hello_hdr(struct isis_circuit *circuit, int level,
 	isis_circuit_stream(circuit, &circuit->snd_stream);
 	fill_fixed_hdr(pdu_type, circuit->snd_stream);
 
-	{
-		static int dbg_all = 0;
-		if (dbg_all++ < 10) {
-			FILE *f = fopen("/tmp/iih_all.log", "a");
-			if (f) {
-				fprintf(f, "put_hello: iface=%s level=%d boundary=%d enabled=%d\n",
-					circuit->interface->name, level,
-					circuit->is_area_proxy_boundary,
-					circuit->area ? circuit->area->area_proxy_enabled : 0);
-				fclose(f);
-			}
-		}
-	}
-
 	if (circuit->is_area_proxy_boundary && circuit->area &&
 	    circuit->area->area_proxy_enabled) {
 		stream_putc(circuit->snd_stream, IS_LEVEL_2);
