@@ -896,6 +896,24 @@ static int process_lsp(uint8_t pdu_type, struct isis_circuit *circuit,
 	hdr.checksum = stream_getw(circuit->rcv_stream);
 	hdr.lsp_bits = stream_getc(circuit->rcv_stream);
 
+	/*
+	 * Area Proxy receive-side guard (LSP PDU path):
+	 * on boundary L2 circuits, reject non-Proxy L2 LSPs from
+	 * outside areas before they enter the local LSDB.
+	 * MUST be before rem_lifetime==0 purge handling to catch
+	 * purge PDUs as well as live LSPs.
+	 */
+	if (level == ISIS_LEVEL2
+	    && isis_area_proxy_circuit_is_outside(circuit)
+	    && !isis_lsp_id_is_proxy_lsp(hdr.lsp_id)
+	    && memcmp(hdr.lsp_id, circuit->isis->sysid, ISIS_SYS_ID_LEN) != 0) {
+		circuit->area->ap_rx_lsp_filtered++;
+		area_proxy_debug(
+			"Area Proxy: dropped non-Proxy L2 LSP %pLS on boundary circuit %s",
+			hdr.lsp_id, circuit->interface->name);
+		goto out;
+	}
+
 #ifndef FABRICD
 	/* send northbound notification */
 	isis_notif_lsp_received(circuit, hdr.lsp_id, hdr.seqno, time(NULL),
@@ -1590,6 +1608,21 @@ static int process_snp(uint8_t pdu_type, struct isis_circuit *circuit,
 				lsp = lsp_new(circuit->area, entry->id,
 						entry->rem_lifetime, 0, 0,
 						entry->checksum, lsp0, level);
+				/*
+				 * Area Proxy receive-side guard (CSNP path):
+				 * on boundary L2 circuits, do not insert
+				 * non-Proxy L2 LSP entries from CSNP
+				 * summaries into the local LSDB.
+				 */
+				if (level == ISIS_LEVEL2
+				    && isis_area_proxy_circuit_is_outside(
+					    circuit)
+				    && !isis_lsp_id_is_proxy_lsp(entry->id)
+				    && memcmp(entry->id, circuit->isis->sysid,
+					      ISIS_SYS_ID_LEN) != 0) {
+					circuit->area->ap_rx_snp_filtered++;
+					continue;
+				}
 				lsp_insert(&circuit->area->lspdb[level - 1],
 					   lsp);
 
