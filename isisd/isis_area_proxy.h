@@ -58,6 +58,25 @@ extern bool isis_area_proxy_lsp_should_flood(const struct isis_lsp *lsp,
 /* Check if System ID belongs to an Inside Router (exists in L1 LSDB) */
 extern bool isis_sysid_in_l1_lsdb(struct isis_area *area, const uint8_t *sysid);
 
+/* Check if an LSP ID matches the Proxy LSP prefix (ffff.0000.00xx) */
+extern bool isis_lsp_id_is_proxy_lsp(const uint8_t *lsp_id);
+
+/*
+ * Circuit role helpers for Area Proxy.
+ *
+ * Deployment convention (SatStripe):
+ *   AP inside circuit  := IS-IS Level-1-2 circuit
+ *   AP outside circuit := IS-IS Level-2-only circuit
+ *
+ * This is an implementation/deployment convention, not a generic IS-IS
+ * semantic.  All code should use these helpers rather than testing
+ * circuit->is_type directly.
+ */
+extern bool isis_area_proxy_circuit_is_outside(
+	const struct isis_circuit *circuit);
+extern bool isis_area_proxy_circuit_is_inside(
+	const struct isis_circuit *circuit);
+
 /* For show commands */
 extern void isis_area_proxy_show(struct vty *vty, const struct isis_area *area);
 extern void isis_area_proxy_show_election(struct vty *vty, struct isis_area *area);

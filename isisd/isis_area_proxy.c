@@ -1828,6 +1828,51 @@ bool isis_area_proxy_lsp_is_inside_real(const struct isis_lsp *lsp)
 }
 
 /*
+ * Check if an LSP ID (raw 8 bytes) matches the Proxy LSP prefix.
+ */
+bool isis_lsp_id_is_proxy_lsp(const uint8_t *lsp_id)
+{
+	static const uint8_t prefix[] = {0xff, 0xff, 0x00, 0x00, 0x00};
+	return memcmp(lsp_id, prefix, sizeof(prefix)) == 0;
+}
+
+/*
+ * Circuit role: outside (boundary) circuit.
+ *
+ * Deployment convention (SatStripe):
+ *   AP inside circuit  := IS-IS Level-1-2 circuit
+ *   AP outside circuit := IS-IS Level-2-only circuit
+ *
+ * This is an implementation/deployment convention, not a generic
+ * IS-IS semantic.  The reconciler's is_area_proxy_boundary flag is
+ * the primary determinant; is_type == IS_LEVEL_2 is a fallback
+ * for early startup before the flag is set, and also reflects the
+ * current deployment convention.
+ */
+bool isis_area_proxy_circuit_is_outside(const struct isis_circuit *circuit)
+{
+	if (!circuit || !circuit->area || !circuit->area->area_proxy_enabled)
+		return false;
+
+	if (circuit->is_area_proxy_boundary)
+		return true;
+
+	return circuit->is_type == IS_LEVEL_2;
+}
+
+/*
+ * Circuit role: inside circuit.
+ */
+bool isis_area_proxy_circuit_is_inside(const struct isis_circuit *circuit)
+{
+	if (!circuit || !circuit->area || !circuit->area->area_proxy_enabled)
+		return false;
+
+	return circuit->is_type == IS_LEVEL_1_AND_2
+		&& !circuit->is_area_proxy_boundary;
+}
+
+/*
  * Three-state classification of an L2 LSP's scope relative to this Area.
  *
  * Returns one of:
@@ -1902,8 +1947,7 @@ bool isis_area_proxy_lsp_should_flood(const struct isis_lsp *lsp,
 		return true;
 
 	enum area_proxy_lsp_scope scope = isis_area_proxy_lsp_classify(lsp);
-	bool is_boundary = circuit->is_area_proxy_boundary
-			|| circuit->is_type == IS_LEVEL_2;
+	bool is_boundary = isis_area_proxy_circuit_is_outside(circuit);
 
 	switch (scope) {
 	case AP_LSP_SCOPE_PROXY:
