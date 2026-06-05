@@ -904,9 +904,7 @@ static int process_lsp(uint8_t pdu_type, struct isis_circuit *circuit,
 	 * purge PDUs as well as live LSPs.
 	 */
 	if (level == ISIS_LEVEL2
-	    && isis_area_proxy_circuit_is_outside(circuit)
-	    && !isis_lsp_id_is_proxy_lsp(hdr.lsp_id)
-	    && memcmp(hdr.lsp_id, circuit->isis->sysid, ISIS_SYS_ID_LEN) != 0) {
+	    && area_proxy_drop_rx_real_l2_on_boundary(circuit, hdr.lsp_id)) {
 		circuit->area->ap_rx_lsp_filtered++;
 		area_proxy_debug(
 			"Area Proxy: dropped non-Proxy L2 LSP %pLS on boundary circuit %s",
@@ -1615,11 +1613,8 @@ static int process_snp(uint8_t pdu_type, struct isis_circuit *circuit,
 				 * summaries into the local LSDB.
 				 */
 				if (level == ISIS_LEVEL2
-				    && isis_area_proxy_circuit_is_outside(
-					    circuit)
-				    && !isis_lsp_id_is_proxy_lsp(entry->id)
-				    && memcmp(entry->id, circuit->isis->sysid,
-					      ISIS_SYS_ID_LEN) != 0) {
+				    && area_proxy_drop_rx_real_l2_on_boundary(
+					    circuit, entry->id)) {
 					circuit->area->ap_rx_snp_filtered++;
 					continue;
 				}

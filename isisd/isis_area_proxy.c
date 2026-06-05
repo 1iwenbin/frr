@@ -1891,6 +1891,45 @@ bool isis_area_proxy_circuit_is_inside(const struct isis_circuit *circuit)
 }
 
 /*
+ * Receive-side guard: should we drop a received non-Proxy L2 LSP
+ * on a boundary circuit?
+ *
+ * Returns true if the LSP should be dropped:
+ *   - Boundary circuit AND
+ *   - Not a Proxy LSP AND
+ *   - Not self-originated AND
+ *   - Source SysID not in this Area's L1 LSDB (= foreign)
+ *
+ * Same-area real L2 LSPs are allowed to transit boundary circuits
+ * within the proxy area.  Only outside-area real L2 LSPs are dropped.
+ *
+ * NOTE: during startup when L1 LSDB is empty, this may temporarily
+ * drop legitimate same-area L2 LSPs.  A future improvement is to unify
+ * with isis_area_proxy_lsp_classify() which uses area-address fallback
+ * when L1 LSDB is empty.
+ */
+bool area_proxy_drop_rx_real_l2_on_boundary(
+	struct isis_circuit *circuit, const uint8_t *lsp_id)
+{
+	if (!circuit || !circuit->area || !circuit->area->area_proxy_enabled)
+		return false;
+
+	if (!isis_area_proxy_circuit_is_outside(circuit))
+		return false;
+
+	if (isis_lsp_id_is_proxy_lsp(lsp_id))
+		return false;
+
+	if (!memcmp(lsp_id, circuit->isis->sysid, ISIS_SYS_ID_LEN))
+		return false;
+
+	if (isis_sysid_in_l1_lsdb(circuit->area, lsp_id))
+		return false;
+
+	return true;
+}
+
+/*
  * Three-state classification of an L2 LSP's scope relative to this Area.
  *
  * Returns one of:

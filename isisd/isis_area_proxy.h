@@ -76,6 +76,8 @@ extern bool isis_area_proxy_circuit_is_outside(
 	const struct isis_circuit *circuit);
 extern bool isis_area_proxy_circuit_is_inside(
 	const struct isis_circuit *circuit);
+extern bool area_proxy_drop_rx_real_l2_on_boundary(
+	struct isis_circuit *circuit, const uint8_t *lsp_id);
 
 /* For show commands */
 extern void isis_area_proxy_show(struct vty *vty, const struct isis_area *area);
