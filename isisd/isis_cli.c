@@ -2508,6 +2508,45 @@ void cli_show_ip_isis_network_type(struct vty *vty,
 	vty_out(vty, " isis network point-to-point\n");
 }
 
+/* ── RFC 9666 Area Proxy: Static Boundary Configuration ── */
+
+DEFUN(isis_area_proxy_boundary,
+      isis_area_proxy_boundary_cmd,
+      "isis area-proxy-boundary",
+      "IS-IS routing protocol\n"
+      "Mark this interface as an Area Proxy boundary circuit\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct isis_circuit *circuit = circuit_scan_by_ifp(ifp);
+
+	if (!circuit) {
+		vty_out(vty,
+			"%% ISIS is not configured on this interface\n");
+		return CMD_WARNING;
+	}
+	circuit->is_area_proxy_boundary = true;
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_isis_area_proxy_boundary,
+      no_isis_area_proxy_boundary_cmd,
+      "no isis area-proxy-boundary",
+      NO_STR
+      "IS-IS routing protocol\n"
+      "Remove Area Proxy boundary marking\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct isis_circuit *circuit = circuit_scan_by_ifp(ifp);
+
+	if (!circuit) {
+		vty_out(vty,
+			"%% ISIS is not configured on this interface\n");
+		return CMD_WARNING;
+	}
+	circuit->is_area_proxy_boundary = false;
+	return CMD_SUCCESS;
+}
+
 /*
  * XPath: /frr-interface:lib/interface/frr-isisd:isis/priority
  */
@@ -3487,6 +3526,9 @@ void isis_cli_init(void)
 	install_element(ISIS_NODE, &no_area_proxy_priority_cmd);
 	install_element(ISIS_NODE, &area_proxy_elect_check_interval_cmd);
 	install_element(ISIS_NODE, &no_area_proxy_elect_check_interval_cmd);
+	/* RFC 9666 Area Proxy: Interface-level boundary marking */
+	install_element(INTERFACE_NODE, &isis_area_proxy_boundary_cmd);
+	install_element(INTERFACE_NODE, &no_isis_area_proxy_boundary_cmd);
 }
 
 #endif /* ifndef FABRICD */
