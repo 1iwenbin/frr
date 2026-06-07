@@ -37,6 +37,7 @@
 #include "isisd/isis_circuit.h"
 #include "isisd/isis_csm.h"
 #include "isisd/isis_area_proxy.h"
+#include "isisd/isis_schedule.h"
 
 #ifndef VTYSH_EXTRACT_PL
 #include "isisd/isis_cli_clippy.c"
@@ -3377,6 +3378,9 @@ DEFUN(no_area_proxy_elect_check_interval,
 	return CMD_SUCCESS;
 }
 
+static const struct cmd_element satellite_schedule_load_cmd;
+static const struct cmd_element satellite_schedule_clear_cmd;
+
 void isis_cli_init(void)
 {
 	static bool done = false;
@@ -3529,6 +3533,43 @@ void isis_cli_init(void)
 	/* RFC 9666 Area Proxy: Interface-level boundary marking */
 	install_element(INTERFACE_NODE, &isis_area_proxy_boundary_cmd);
 	install_element(INTERFACE_NODE, &no_isis_area_proxy_boundary_cmd);
+	/* RFC 9717 §6: Link schedule engine */
+	install_element(ISIS_NODE, &satellite_schedule_load_cmd);
+	install_element(ISIS_NODE, &satellite_schedule_clear_cmd);
+}
+
+/* ────────── extern declarations for commands defined below ────────── */
+
+/* ────────── RFC 9717 §6 Link Schedule Engine ────────── */
+
+DEFUN(satellite_schedule_load,
+      satellite_schedule_load_cmd,
+      "satellite-schedule load FILE",
+      "Satellite link schedule engine\n"
+      "Load JSON schedule table\n"
+      "JSON file path\n")
+{
+	VTY_DECLVAR_CONTEXT(isis_area, area);
+	const char *filepath = argv[2]->arg;
+
+	if (isis_schedule_load(area, filepath) != CMD_SUCCESS) {
+		vty_out(vty, "%% Failed to load schedule from %s\n", filepath);
+		return CMD_WARNING;
+	}
+	vty_out(vty, "Schedule loaded from %s\n", filepath);
+	return CMD_SUCCESS;
+}
+
+DEFUN(satellite_schedule_clear,
+      satellite_schedule_clear_cmd,
+      "satellite-schedule clear",
+      "Satellite link schedule engine\n"
+      "Clear schedule table\n")
+{
+	VTY_DECLVAR_CONTEXT(isis_area, area);
+	isis_schedule_clear(area);
+	vty_out(vty, "Schedule cleared\n");
+	return CMD_SUCCESS;
 }
 
 #endif /* ifndef FABRICD */

@@ -70,6 +70,7 @@ noinst_HEADERS += \
 	isisd/isis_te.h \
 	isisd/isis_tlvs.h \
 	isisd/isis_area_proxy.h \
+	isisd/isis_schedule.h \
 	isisd/isis_tx_queue.h \
 	isisd/isis_zebra.h \
 	isisd/isisd.h \
@@ -102,6 +103,7 @@ LIBISIS_SOURCES = \
 	isisd/isis_te.c \
 	isisd/isis_tlvs.c \
 	isisd/isis_area_proxy.c \
+	isisd/isis_schedule.c \
 	isisd/isis_tx_queue.c \
 	isisd/isis_zebra.c \
 	isisd/isisd.c \

@@ -65,6 +65,7 @@
 #include "isisd/fabricd.h"
 #include "isisd/isis_nb.h"
 #include "isisd/isis_area_proxy.h"
+#include "isisd/isis_schedule.h"
 
 /* For debug statement. */
 unsigned long debug_adj_pkt;
@@ -360,6 +361,9 @@ struct isis_area *isis_area_create(const char *area_tag, const char *vrf_name)
 
 	isis_sr_area_init(area);
 
+	/* RFC 9717 §6: Link schedule engine */
+	area->schedule = NULL; /* lazy init on first load */
+
 	/*
 	 * Default values
 	 */
@@ -522,6 +526,10 @@ void isis_area_destroy(struct isis_area *area)
 
 	if (fabricd)
 		fabricd_finish(area->fabricd);
+
+	/* RFC 9717 §6: Clean up schedule engine */
+	if (area->schedule)
+		isis_schedule_ctx_free(area->schedule);
 
 	if (area->circuit_list) {
 		for (ALL_LIST_ELEMENTS(area->circuit_list, node, nnode,
@@ -3064,6 +3072,52 @@ DEFUN(show_isis_area_proxy_misconfig,
 	return CMD_SUCCESS;
 }
 
+/* ────────── RFC 9717 §6 Link Schedule Engine ────────── */
+
+DEFUN(show_isis_schedule,
+      show_isis_schedule_cmd,
+      "show " PROTO_NAME " [vrf <NAME|all>] schedule",
+      SHOW_STR PROTO_HELP VRF_CMD_HELP_STR
+      "All VRFs\n"
+      "Link schedule (RFC 9717 §6)\n")
+{
+	const char *vrf_name = VRF_DEFAULT_NAME;
+	bool all_vrf = false;
+	int idx_vrf = 0;
+
+	ISIS_FIND_VRF_ARGS(argv, argc, idx_vrf, vrf_name, all_vrf);
+
+	if (!im) {
+		vty_out(vty, PROTO_NAME " is not running\n");
+		return CMD_SUCCESS;
+	}
+
+	if (all_vrf) {
+		struct isis *isis;
+		struct listnode *anode;
+		for (ALL_LIST_ELEMENTS_RO(im->isis, anode, isis)) {
+			struct isis_area *area;
+			struct listnode *a2node;
+			for (ALL_LIST_ELEMENTS_RO(isis->area_list, a2node, area))
+				isis_schedule_show(vty, area);
+		}
+		return CMD_SUCCESS;
+	}
+
+	struct isis *isis = isis_lookup_by_vrfname(vrf_name);
+	if (isis) {
+		struct isis_area *area;
+		struct listnode *a3node;
+		for (ALL_LIST_ELEMENTS_RO(isis->area_list, a3node, area))
+			isis_schedule_show(vty, area);
+	} else {
+		vty_out(vty, "IS-IS instance not found for VRF %s\n",
+			vrf_name);
+	}
+
+	return CMD_SUCCESS;
+}
+
 #ifdef FABRICD
 /*
  * 'router openfabric' command
@@ -3817,6 +3871,7 @@ void isis_init(void)
 	install_element(VIEW_NODE, &show_isis_area_proxy_ready_cmd);
 	install_element(VIEW_NODE, &show_isis_area_proxy_lsp_cmd);
 	install_element(VIEW_NODE, &show_isis_area_proxy_misconfig_cmd);
+	install_element(VIEW_NODE, &show_isis_schedule_cmd);
 	install_element(VIEW_NODE, &show_database_cmd);
 
 	install_element(ENABLE_NODE, &show_debugging_isis_cmd);

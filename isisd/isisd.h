@@ -32,6 +32,7 @@
 #include "isisd/isis_pdu_counter.h"
 #include "isisd/isis_circuit.h"
 #include "isisd/isis_sr.h"
+#include "isisd/isis_schedule.h"
 #include "isis_flags.h"
 #include "isis_lsp.h"
 #include "isis_lfa.h"
@@ -79,6 +80,7 @@ extern struct zebra_privs_t isisd_privs;
 /* #define EXTREME_DEBUG  */
 
 struct fabricd;
+struct isis_schedule_ctx;
 
 struct isis_master {
 	/* ISIS instance. */
@@ -275,6 +277,9 @@ struct isis_area {
 	time_t ap_lsp_last_skip_time;          /* 最后一次 skip nochange 时间 */
 	uint64_t ap_rx_snp_filtered;           /* process_snp CSNP guard dropped */
 	uint64_t ap_rx_lsp_filtered;           /* process_lsp guard dropped */
+
+	/* ── RFC 9717 §6 Link Schedule Engine ── */
+	struct isis_schedule_ctx *schedule;
 
 	QOBJ_FIELDS;
 };
