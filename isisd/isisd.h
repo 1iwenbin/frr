@@ -267,6 +267,7 @@ struct isis_area {
 	time_t area_proxy_last_gen_time;       /* 上次生成 Proxy LSP 的时间戳 */
 	bool area_proxy_mode_set;              /* 模式是否已显式设置 */
 	uint8_t area_proxy_ready_count;        /* Ready Check 连续通过计数 */
+	uint32_t area_proxy_last_seqno;        /* 上次生成的 Proxy LSP seqno (防倒退) */
 
 	/* Phase 9: Area Proxy counters */
 	uint64_t ap_lsp_gen_count;             /* Proxy LSP 生成次数 */

@@ -173,7 +173,8 @@ void isis_area_proxy_show(struct vty *vty, const struct isis_area *area)
 			bool i_am = am_i_leader(area);
 			/* Verify fragment 0 is actually in LSDB, not just
 			 * area->proxy_lsp pointer (may be stale after
-			 * external purge). */
+			 * external purge).  Use lsp_search() directly;
+			 * the pointer comparison is unsafe (dangling). */
 			bool has_proxy = false;
 			if (area->proxy_lsp[ISIS_LEVEL2 - 1]) {
 				uint8_t fid[ISIS_SYS_ID_LEN + 2];
@@ -183,7 +184,6 @@ void isis_area_proxy_show(struct vty *vty, const struct isis_area *area)
 				struct isis_lsp *flsp = lsp_search(
 					&area->lspdb[ISIS_LEVEL2 - 1], fid);
 				has_proxy = (flsp != NULL &&
-					     flsp == area->proxy_lsp[ISIS_LEVEL2 - 1] &&
 					     area_proxy_lsp_fragment_valid(flsp));
 			}
 			vty_out(vty, "  Role: %s\n", i_am ? "LEADER" : "FOLLOWER");
@@ -405,7 +405,14 @@ void isis_area_proxy_show_lsp(struct vty *vty, struct isis_area *area)
 		return;
 	}
 
-	struct isis_lsp *lsp = area->proxy_lsp[ISIS_LEVEL2 - 1];
+	struct isis_lsp *lsp;
+	uint8_t lsp_id_show[ISIS_SYS_ID_LEN + 2];
+
+	/* Use lsp_search() instead of area->proxy_lsp[L2-1] to guard
+	 * against dangling pointer (P6 hardening). */
+	memcpy(lsp_id_show, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
+	lsp_id_show[ISIS_SYS_ID_LEN] = 0;
+	lsp = lsp_search(&area->lspdb[ISIS_LEVEL2 - 1], lsp_id_show);
 	if (!lsp) {
 		vty_out(vty, "No Proxy LSP generated yet\n");
 		return;
@@ -1026,36 +1033,46 @@ static bool am_i_leader(struct isis_area *area)
 }
 
 /*
- * Purge our Proxy LSP and all its fragments (called from admin disable).
+ * Purge our Proxy LSP and ALL its fragments (every pseudo_id).
+ *
+ * Called from: admin disable (no area-proxy), Leader step-down.
+ *
+ * Scans LSDB for every fragment matching area_proxy_sysid prefix,
+ * regardless of whether they are linked via lspu.frags.  This
+ * catches orphan fragments left behind when fragment count shrinks
+ * (e.g. 2→1) and the old fragment was unlinked from lspu.frags
+ * but not removed from LSDB.
  */
 static void isis_area_proxy_lsp_purge(struct isis_area *area)
 {
-	struct isis_lsp *lsp0;
+	uint8_t lsp_id[ISIS_SYS_ID_LEN + 2] = {};
+	int fid;
+	int purged = 0;
 
-	if (!area->proxy_lsp[ISIS_LEVEL2 - 1])
-		return;
-	lsp0 = area->proxy_lsp[ISIS_LEVEL2 - 1];
+	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
 
-	zlog_info("Area Proxy: purging Proxy LSP (admin disable)");
+	for (fid = 0; fid < 255; fid++) {
+		lsp_id[ISIS_SYS_ID_LEN] = fid;
+		struct isis_lsp *lsp = lsp_search(
+			&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
+		if (!lsp)
+			break;  /* sequential IDs — stop at first gap */
+		/* Skip already-purged placeholders (PduLen==27, rem_lifetime==0);
+		 * they will age out naturally. */
+		if (lsp->hdr.rem_lifetime == 0)
+			continue;
 
-	/* Purge all fragments first */
-	if (lsp0->lspu.frags) {
-		struct listnode *node;
-		struct isis_lsp *frag;
-		for (ALL_LIST_ELEMENTS_RO(lsp0->lspu.frags, node, frag)) {
-			frag->hdr.rem_lifetime = 0;
-			lsp_flood(frag, NULL);
-			lsp_search_and_destroy(&area->lspdb[ISIS_LEVEL2 - 1],
-					       frag->hdr.lsp_id);
-		}
-		list_delete_all_node(lsp0->lspu.frags);
+		lsp->hdr.rem_lifetime = 0;
+		lsp_flood(lsp, NULL);
+		lsp_search_and_destroy(&area->lspdb[ISIS_LEVEL2 - 1],
+				       lsp->hdr.lsp_id);
+		purged++;
 	}
 
-	/* Purge fragment 0 */
-	lsp0->hdr.rem_lifetime = 0;
-	lsp_flood(lsp0, NULL);
-	lsp_search_and_destroy(&area->lspdb[ISIS_LEVEL2 - 1],
-			       lsp0->hdr.lsp_id);
+	if (purged > 0)
+		zlog_info("Area Proxy: purged %d Proxy LSP fragments "
+			  "(step-down or admin disable)", purged);
+
 	area->proxy_lsp[ISIS_LEVEL2 - 1] = NULL;
 }
 
@@ -1243,32 +1260,49 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 
 			ready = isis_area_proxy_ready(area);
 			bool first_attempt = (area->proxy_lsp[ISIS_LEVEL2 - 1] == NULL);
+
 			if (!ready && !first_attempt) {
-				zlog_info("Area Proxy: not ready in reconcile, deferring");
-				if (area->area_proxy_ready_count > 0)
-					area->ap_ready_changes++;
+				zlog_info("Area Proxy: not ready, deferring");
+				area->area_proxy_ready_count = 0;
+			} else if (first_attempt) {
+				zlog_info("Area Proxy: first reconcile, generating directly");
+				area->ap_reconcile_running = false;
+				isis_area_proxy_lsp_generate(area);
+				area->proxy_lsp_dirty = false;
+				area->area_proxy_last_gen_time = monotime(NULL);
 				area->area_proxy_ready_count = 0;
 			} else {
-				/* First attempt after enable: bypass ready check,
-				 * generate immediately. Subsequent regenerations
-				 * use debounce=2 against ready check. */
-				if (first_attempt) {
-					zlog_info("Area Proxy: first reconcile, generating directly");
-					area->ap_reconcile_running = false;
-					isis_area_proxy_lsp_generate(area);
-					area->proxy_lsp_dirty = false;
-					area->area_proxy_last_gen_time = monotime(NULL);
-					area->area_proxy_ready_count = 0;
-				} else {
-					area->area_proxy_ready_count++;
-					if (area->area_proxy_ready_count >= 2) {
-						zlog_info("Area Proxy: ready debounced → generate");
+				area->area_proxy_ready_count++;
+				if (area->area_proxy_ready_count >= 2) {
+					/* ── P1: Convergence guard ── */
+					uint8_t p1_id[ISIS_SYS_ID_LEN + 2];
+					memcpy(p1_id, area->area_proxy_sysid,
+					       ISIS_SYS_ID_LEN);
+					p1_id[ISIS_SYS_ID_LEN] = 0;
+					struct isis_lsp *existing = lsp_search(
+						&area->lspdb[ISIS_LEVEL2 - 1],
+						p1_id);
+
+					if (existing &&
+					    existing->hdr.rem_lifetime != 0 &&
+					    existing->hdr.seqno != 0 &&
+					    !area->proxy_lsp_dirty) {
+						zlog_info("Area Proxy: "
+							  "skip generate — "
+							  "valid Proxy LSP "
+							  "+ !dirty "
+							  "(convergence guard)");
+					} else {
+						zlog_info("Area Proxy: "
+							  "ready debounced → "
+							  "generate");
 						area->ap_reconcile_running = false;
 						isis_area_proxy_lsp_generate(area);
 						area->proxy_lsp_dirty = false;
-						area->area_proxy_last_gen_time = monotime(NULL);
-						area->area_proxy_ready_count = 0;
+						area->area_proxy_last_gen_time =
+							monotime(NULL);
 					}
+					area->area_proxy_ready_count = 0;
 				}
 			}
 		} else {
@@ -1276,7 +1310,6 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 			if (was_leader) {
 				zlog_info("Area Proxy: stepped down as LEADER");
 				area->ap_leader_changes++;
-				area->area_proxy_last_gen_time = 0;
 				area->proxy_lsp[ISIS_LEVEL2 - 1] = NULL;
 			}
 		}
@@ -1456,29 +1489,23 @@ out:
 static bool area_proxy_lsp_content_unchanged(struct isis_area *area,
 					     struct list *new_fragments)
 {
-	struct isis_lsp *lsp0 = area->proxy_lsp[ISIS_LEVEL2 - 1];
+	struct isis_lsp *lsp0;
 	struct listnode *node;
 	struct isis_tlvs *new_frag_tlvs;
-	uint8_t lsp_id[ISIS_SYS_ID_LEN + 2];
+	uint8_t lsp_id[ISIS_SYS_ID_LEN + 2] = {};
 	int old_frag_count, new_frag_count;
 	int idx = 0;
 
-	if (!lsp0)
-		return false;  /* first generation */
-
 	/* Build base LSP ID for fragment lookup */
 	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
-	lsp_id[ISIS_SYS_ID_LEN] = 0; /* pseudo ID */
+	/* lsp_id[ISIS_SYS_ID_LEN]=0 and lsp_id[ISIS_SYS_ID_LEN+1]=0 already from {} */
 
-	/* MUST: fragment 0 must exist in LSDB and match the pointer */
-	{
-		struct isis_lsp *db_lsp0 = lsp_search(
-			&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
-		if (!db_lsp0 || db_lsp0 != lsp0)
-			return false;
-		if (!area_proxy_lsp_fragment_valid(db_lsp0))
-			return false;
-	}
+	/* Use lsp_search() instead of area->proxy_lsp[L2-1] to guard
+	 * against dangling pointer (P6 hardening).  Also validates
+	 * that fragment 0 is complete and valid in LSDB. */
+	lsp0 = lsp_search(&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
+	if (!lsp0 || !area_proxy_lsp_fragment_valid(lsp0))
+		return false;
 
 	/* Compare fragment count */
 	new_frag_count = listcount(new_fragments);
@@ -1520,7 +1547,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 {
 	struct isis_lsp *lsp0;
 	struct isis_tlvs *tlvs;
-	uint8_t lsp_id[ISIS_SYS_ID_LEN + 2];
+	uint8_t lsp_id[ISIS_SYS_ID_LEN + 2] = {};
 	struct list *fragments;
 	struct listnode *node;
 	struct isis_tlvs *frag_tlvs;
@@ -1588,11 +1615,19 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	 *
 	 * Exception: if rem_lifetime < lsp_refresh, allow normal
 	 * regenerate to refresh the lifetime.  Proxy LSPs have no
-	 * independent refresh timer. */
+	 * independent refresh timer.
+	 *
+	 * Use lsp_search() for the lifetime check to guard against
+	 * dangling pointer (P6 hardening). */
+
+	/* Build LSP ID early: needed by content guard and fragment 0 lookup */
+	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
+	lsp_id[ISIS_SYS_ID_LEN] = 0; /* pseudo ID */
+
 	if (area->proxy_lsp[ISIS_LEVEL2 - 1] &&
 	    area_proxy_lsp_content_unchanged(area, fragments)) {
-		lsp0 = area->proxy_lsp[ISIS_LEVEL2 - 1];
-		if (lsp0->hdr.rem_lifetime >=
+		lsp0 = lsp_search(&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
+		if (lsp0 && lsp0->hdr.rem_lifetime >=
 		    area->lsp_refresh[ISIS_LEVEL2 - 1]) {
 			zlog_debug("Area Proxy: content unchanged, skip regenerate");
 			area_proxy_fragment_list_free(fragments);
@@ -1606,14 +1641,16 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 			   lsp0->hdr.rem_lifetime);
 	}
 
-	/* Build LSP ID: proxy_sysid + pseudo_id=0 */
-	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
-	lsp_id[ISIS_SYS_ID_LEN] = 0; /* pseudo ID */
-
 	/* --- Fragment 0: reuse existing or create new ---
-	 * In-place update prevents purge flood to receivers. */
-	lsp0 = area->proxy_lsp[ISIS_LEVEL2 - 1];
-	if (lsp0) {
+	 * In-place update prevents purge flood to receivers.
+	 *
+	 * Use lsp_search() instead of area->proxy_lsp[L2-1] to guard
+	 * against dangling pointer: FRR's age_out may free the LSP
+	 * externally, leaving proxy_lsp[] pointing to freed memory.
+	 * lsp_search() returns a valid pointer (or NULL) from LSDB. */
+	lsp0 = lsp_search(&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
+	if (lsp0 && lsp0->hdr.rem_lifetime != 0 && lsp0->hdr.seqno != 0) {
+		area->proxy_lsp[ISIS_LEVEL2 - 1] = lsp0;
 		lsp_inc_seqno(lsp0, 0);
 		if (lsp0->tlvs) {
 			isis_free_tlvs(lsp0->tlvs);
@@ -1648,7 +1685,22 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 				area->max_lsp_lifetime[ISIS_LEVEL2 - 1];
 			lsp0->age_out = ZERO_AGE_LIFETIME;
 		} else {
-			new_seqno = 1;
+			/* Determine starting seqno.
+			 * Priority: tombstone in LSDB > last generated > 1.
+			 * If the tombstone was already destroyed by FRR
+			 * (age_out=0), we still remember the last seqno. */
+			uint32_t base_seqno = area->area_proxy_last_seqno + 1;
+			struct isis_lsp *tombstone = lsp_search(
+				&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
+			if (tombstone) {
+				if (tombstone->hdr.seqno >= base_seqno)
+					base_seqno = tombstone->hdr.seqno + 1;
+				lsp_search_and_destroy(
+					&area->lspdb[ISIS_LEVEL2 - 1],
+					tombstone->hdr.lsp_id);
+			}
+
+			new_seqno = base_seqno;
 			lsp0 = lsp_new(area, lsp_id,
 				       area->max_lsp_lifetime[ISIS_LEVEL2 - 1],
 				       new_seqno,
@@ -1662,6 +1714,20 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 			lsp0->own_lsp = 0;
 		}
 		area->proxy_lsp[ISIS_LEVEL2 - 1] = lsp0;
+	}
+
+	/* Safety: lsp0 must be valid before creating sub-fragments.
+	 * In high-churn scenarios (100-node areas, crash-restart cycles),
+	 * LSDB mutations between the fragment 0 path and here can
+	 * invalidate the pointer.  Re-validate from LSDB. */
+	if (!lsp0) {
+		lsp0 = lsp_search(&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
+	}
+	if (!lsp0) {
+		zlog_err("Area Proxy: fragment 0 unavailable, abort generate");
+		area_proxy_fragment_list_free(fragments);
+		area->ap_reconcile_running = false;
+		return -1;
 	}
 
 	/* --- Assign fragmented TLVs to LSPs, link via lspu.frags ---
@@ -1753,43 +1819,12 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		  lsp_id, frag_count);
 	area->ap_lsp_gen_count++;
 
-	/* ── Purge obsolete fragments (pseudo_id >= frag_count) ──
-	 * When the new generation has fewer fragments than the old one
-	 * (e.g. topology shrinks), the leftover fragments must be
-	 * explicitly purged.  Otherwise they persist in LSDB and on
-	 * remote nodes, advertising stale prefix/reachability.
-	 *
-	 * Safe unlinking: collect listnodes to delete, then remove
-	 * after the iteration so we don't invalidate the iterator. */
-	if (lsp0->lspu.frags) {
-		struct listnode *lnode, *lnode_next;
-		struct isis_lsp *flsp;
-
-		for (lnode = listhead(lsp0->lspu.frags);
-		     lnode; lnode = lnode_next) {
-			lnode_next = listnextnode(lnode);
-			flsp = listgetdata(lnode);
-			uint8_t fid = LSP_FRAGMENT(flsp->hdr.lsp_id);
-
-			if (fid >= (uint8_t)frag_count) {
-				zlog_info("Area Proxy: purging obsolete fragment %pLS (fid=%d >= %d)",
-					  flsp->hdr.lsp_id, fid, frag_count);
-				/* Send purge PDU to all neighbours */
-				flsp->hdr.rem_lifetime = 0;
-				flsp->age_out = ZERO_AGE_LIFETIME;
-				lsp_pack_pdu_ext(flsp);
-				lsp_flood(flsp, NULL);
-				/* Unlink from lspu.frags — the LSP stays in
-				 * LSDB and will be cleaned up by age_out. */
-				list_delete_node(lsp0->lspu.frags, lnode);
-			}
-		}
-	}
-
 	/* Flood all valid fragments to L2 circuits.
-	 * lsp_flood(lsp, NULL) sets SRM on all circuits; the Area Proxy
-	 * flood filter inside lsp_set_all_srmflags() handles per-circuit
-	 * isolation (Proxy LSP → unconditional flood, others → filtered). */
+	 * Old fragments from previous generations are NOT actively
+	 * purged — they age out naturally via FRR's lsp_tick().
+	 * The new Leader's higher seqno ensures SPF ignores stale
+	 * fragments, so active purge has no routing value and only
+	 * creates unnecessary purge PDU storms. */
 	lsp_flood(lsp0, NULL);
 	if (lsp0->lspu.frags) {
 		struct listnode *lnode;
@@ -1798,6 +1833,14 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		for (ALL_LIST_ELEMENTS_RO(lsp0->lspu.frags, lnode, flsp))
 			lsp_flood(flsp, NULL);
 	}
+
+	/* Record last seqno to prevent regress across generations
+	 * even after tombstone is cleaned up by FRR. */
+	area->area_proxy_last_seqno = lsp0->hdr.seqno;
+
+	zlog_info("Area Proxy: generated %pLS seq=0x%08x lifetime=%us age_out=%u",
+		  lsp0->hdr.lsp_id, lsp0->hdr.seqno,
+		  lsp0->hdr.rem_lifetime, lsp0->age_out);
 
 	area->ap_reconcile_running = false;
 
