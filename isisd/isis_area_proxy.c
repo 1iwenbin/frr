@@ -312,39 +312,22 @@ void isis_area_proxy_show_election(struct vty *vty, struct isis_area *area)
 	vty_out(vty, "Debounce count: %u/2\n", area->area_proxy_ready_count);
 
 	bool is_leader = am_i_leader(area);
-	/* Diagnostic: re-run election inline to show winner */
+	/* Diagnostic: re-run election via shared compute to show winner */
 	{
-		uint8_t winner_sysid[ISIS_SYS_ID_LEN] = {};
-		uint8_t winner_prio = 0;
-		bool found = false;
-		for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp;
-		     lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
-			uint8_t p = 0;
-			bool own = (memcmp(lsp->hdr.lsp_id, area->isis->sysid,
-					   ISIS_SYS_ID_LEN) == 0);
-			if (isis_lsp_is_proxy_lsp(lsp)) continue;
-			if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0) continue;
-			if (!own) {
-				if (!isis_spf_sysid_reachable(area, lsp->hdr.lsp_id)) continue;
-			}
-			if (own) p = area->area_proxy_leader_priority;
-			else if (lsp->tlvs && lsp->tlvs->router_cap)
-				p = lsp->tlvs->router_cap->area_leader_priority;
-			if (p == 0) continue;
-			if (!found || p > winner_prio ||
-			    (p == winner_prio &&
-			     memcmp(lsp->hdr.lsp_id, winner_sysid, ISIS_SYS_ID_LEN) > 0)) {
-				winner_prio = p;
-				memcpy(winner_sysid, lsp->hdr.lsp_id, ISIS_SYS_ID_LEN);
-				found = true;
-			}
+		struct area_proxy_election_result r =
+			area_proxy_election_compute(area);
+		vty_out(vty, "Election winner: ");
+		if (r.valid) {
+			vty_out(vty, "%02x%02x.%02x%02x.%02x%02x prio=%u (self=%s)\n",
+				r.winner_sysid[0], r.winner_sysid[1],
+				r.winner_sysid[2], r.winner_sysid[3],
+				r.winner_sysid[4], r.winner_sysid[5],
+				r.winner_priority,
+				memcmp(r.winner_sysid, area->isis->sysid,
+				       ISIS_SYS_ID_LEN) == 0 ? "yes" : "no");
+		} else {
+			vty_out(vty, "(none)\n");
 		}
-		vty_out(vty, "Election winner: %02x%02x.%02x%02x.%02x%02x prio=%u (self=%s)\n",
-			winner_sysid[0], winner_sysid[1], winner_sysid[2],
-			winner_sysid[3], winner_sysid[4], winner_sysid[5],
-			winner_prio,
-			memcmp(winner_sysid, area->isis->sysid, ISIS_SYS_ID_LEN) == 0
-			? "yes" : "no");
 	}
 	vty_out(vty, "Computed leader: %s\n",
 		is_leader ? "this router" : "another router");
@@ -970,78 +953,83 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
  * This guarantees a single area-wide leader, not per-clique leaders.
  * Winner: highest priority, ties broken by highest System ID.
  */
-static bool am_i_leader(struct isis_area *area)
-{
-	struct isis_lsp *lsp;
-	struct {
-		uint8_t sysid[ISIS_SYS_ID_LEN];
-		uint8_t priority;
-		bool valid;
-	} best = { .valid = false };
 
-	/* Build L1 SPF reachable set once for all candidates */
-	area_proxy_debug("Area Proxy: election started, local sysid=%pSY prio=%u",
-			 area->isis->sysid, area->area_proxy_leader_priority);
+/* Result of a leader election computation. */
+struct area_proxy_election_result {
+	uint8_t winner_sysid[ISIS_SYS_ID_LEN];
+	uint8_t winner_priority;
+	bool valid;   /* false → no candidates found */
+};
+
+/*
+ * Compute the Area Leader by scanning L2 LSDB.
+ *
+ * Reads election info (Type 27 area_leader_priority) from L2 LSDB.
+ * Filters by L1 SPF reachability (direct SPF tree query).
+ * Winner: highest priority, ties broken by highest System ID.
+ */
+static struct area_proxy_election_result
+area_proxy_election_compute(struct isis_area *area)
+{
+	struct area_proxy_election_result result = { .valid = false };
+	struct isis_lsp *lsp;
 
 	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp;
 	     lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
 		uint8_t priority = 0;
-		const char *skip_reason = NULL;
 		bool is_own = (memcmp(lsp->hdr.lsp_id, area->isis->sysid,
 				      ISIS_SYS_ID_LEN) == 0);
 
-		if (isis_lsp_is_proxy_lsp(lsp)) {
-			skip_reason = "is proxy LSP";
-			goto skip;
-		}
-		if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0) {
-			skip_reason = "expired/purged";
-			goto skip;
-		}
+		if (isis_lsp_is_proxy_lsp(lsp))
+			continue;
+		if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0)
+			continue;
 
-		/* L1 SPF reachability via SPF tree */
-		if (!is_own && !isis_spf_sysid_reachable(area, lsp->hdr.lsp_id)) {
-			skip_reason = "L1 SPF unreachable";
-			goto skip;
-		}
+		if (!is_own && !isis_spf_sysid_reachable(area, lsp->hdr.lsp_id))
+			continue;
 
 		if (is_own)
 			priority = area->area_proxy_leader_priority;
 		else if (lsp->tlvs && lsp->tlvs->router_cap)
 			priority = lsp->tlvs->router_cap->area_leader_priority;
-		if (priority == 0) {
-			skip_reason = "priority=0 (no Type 27)";
-			goto skip;
-		}
+		if (priority == 0)
+			continue;
 
-		if (!best.valid ||
-		    priority > best.priority ||
-		    (priority == best.priority &&
-		     memcmp(lsp->hdr.lsp_id, best.sysid, ISIS_SYS_ID_LEN) > 0)) {
-			best.priority = priority;
-			memcpy(best.sysid, lsp->hdr.lsp_id, ISIS_SYS_ID_LEN);
-			best.valid = true;
+		if (!result.valid ||
+		    priority > result.winner_priority ||
+		    (priority == result.winner_priority &&
+		     memcmp(lsp->hdr.lsp_id, result.winner_sysid,
+			    ISIS_SYS_ID_LEN) > 0)) {
+			result.winner_priority = priority;
+			memcpy(result.winner_sysid, lsp->hdr.lsp_id,
+			       ISIS_SYS_ID_LEN);
+			result.valid = true;
 		}
-		area_proxy_debug("Area Proxy:   candidate %pSY prio=%u reachable=yes%s",
-				 lsp->hdr.lsp_id, priority,
-				 is_own ? " (self)" : "");
-		continue;
-
-	skip:
-		area_proxy_debug("Area Proxy:   skip    %pSY reason=%s",
-				 lsp->hdr.lsp_id, skip_reason);
 	}
+	return result;
+}
 
-	if (!best.valid) {
-		/* No valid candidates found — election hasn't converged yet.
-		 * Return false to prevent premature Proxy LSP generation.
-		 * The next reconcile cycle will retry after LSDB converges. */
+/*
+ * Determine if this router is the Area Leader.
+ * Delegates to area_proxy_election_compute().
+ */
+static bool am_i_leader(struct isis_area *area)
+{
+	area_proxy_debug("Area Proxy: election started, local sysid=%pSY prio=%u",
+			 area->isis->sysid, area->area_proxy_leader_priority);
+
+	struct area_proxy_election_result r =
+		area_proxy_election_compute(area);
+
+	if (!r.valid) {
 		area_proxy_debug("Area Proxy: election — no valid candidate, deferring");
 		return false;
 	}
-	bool i_am = (memcmp(best.sysid, area->isis->sysid, ISIS_SYS_ID_LEN) == 0);
+	bool i_am = (memcmp(r.winner_sysid, area->isis->sysid,
+			    ISIS_SYS_ID_LEN) == 0);
 	area_proxy_debug("Area Proxy: election result — winner=%pSY prio=%u i_am=%s",
-			 best.sysid, best.priority, i_am ? "LEADER" : "FOLLOWER");
+			 r.winner_sysid, r.winner_priority,
+			 i_am ? "LEADER" : "FOLLOWER");
 	return i_am;
 }
 
