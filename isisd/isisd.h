@@ -277,6 +277,7 @@ struct isis_area {
 	uint64_t ap_flood_event_count;         /* 最近一次事件的泛洪 LSP 数 */
 	uint64_t ap_ready_changes;             /* Ready 状态变化次数 */
 	uint64_t ap_lsp_skip_nochange;         /* 内容未变化跳过 regenerate 次数 */
+	uint64_t ap_lsp_refresh_count;         /* 基于时间的主动刷新次数 */
 	time_t ap_lsp_last_skip_time;          /* 最后一次 skip nochange 时间 */
 	uint64_t ap_rx_snp_filtered;           /* process_snp CSNP guard dropped */
 	uint64_t ap_rx_lsp_filtered;           /* process_lsp guard dropped */

@@ -391,8 +391,9 @@ void isis_area_proxy_show_ready(struct vty *vty, struct isis_area *area)
 	}
 	if (missing == 0)
 		vty_out(vty, "  (none)\n");
-	vty_out(vty, "\nCounters: gen=%llu skip_nochange=%llu leader_chg=%llu ready_chg=%llu flood_filtered=%llu flood_event=%llu rx_snp=%llu rx_lsp=%llu\n",
+	vty_out(vty, "\nCounters: gen=%llu skip_nochange=%llu refresh=%llu leader_chg=%llu ready_chg=%llu flood_filtered=%llu flood_event=%llu rx_snp=%llu rx_lsp=%llu\n",
 		area->ap_lsp_gen_count, area->ap_lsp_skip_nochange,
+		area->ap_lsp_refresh_count,
 		area->ap_leader_changes, area->ap_ready_changes,
 		area->ap_filtered_lsp_count, area->ap_flood_event_count,
 		area->ap_rx_snp_filtered, area->ap_rx_lsp_filtered);
@@ -1277,7 +1278,7 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 			} else {
 				area->area_proxy_ready_count++;
 				if (area->area_proxy_ready_count >= 2) {
-					/* ── P1: Convergence guard ── */
+					/* ── P1: Convergence guard (with time-based refresh) ── */
 					uint8_t p1_id[ISIS_SYS_ID_LEN + 2];
 					memcpy(p1_id, area->area_proxy_sysid,
 					       ISIS_SYS_ID_LEN);
@@ -1286,19 +1287,46 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 						&area->lspdb[ISIS_LEVEL2 - 1],
 						p1_id);
 
+					/* LSP refresh threshold: same semantics as
+					 * standard IS-IS lsp_refresh (default 900s).
+					 * Force regenerate when Proxy LSP lifetime
+					 * drops below this, even if !dirty. */
+					uint16_t refresh_limit =
+						area->lsp_refresh[ISIS_LEVEL2 - 1]
+							? area->lsp_refresh[ISIS_LEVEL2 - 1]
+							: 900;
+					bool need_refresh =
+						existing &&
+						existing->hdr.rem_lifetime != 0 &&
+						existing->hdr.seqno != 0 &&
+						existing->hdr.rem_lifetime <
+							refresh_limit;
+
 					if (existing &&
 					    existing->hdr.rem_lifetime != 0 &&
 					    existing->hdr.seqno != 0 &&
-					    !area->proxy_lsp_dirty) {
+					    !area->proxy_lsp_dirty &&
+					    !need_refresh) {
+						area->ap_lsp_skip_nochange++;
 						zlog_info("Area Proxy: "
 							  "skip generate — "
 							  "valid Proxy LSP "
 							  "+ !dirty "
 							  "(convergence guard)");
 					} else {
-						zlog_info("Area Proxy: "
-							  "ready debounced → "
-							  "generate");
+						if (need_refresh) {
+							area->ap_lsp_refresh_count++;
+							zlog_info("Area Proxy: "
+								  "time-based refresh — "
+								  "lifetime %us < %us",
+								  existing->hdr
+									.rem_lifetime,
+								  refresh_limit);
+						} else {
+							zlog_info("Area Proxy: "
+								  "ready debounced → "
+								  "generate");
+						}
 						area->ap_reconcile_running = false;
 						isis_area_proxy_lsp_generate(area);
 						area->proxy_lsp_dirty = false;
