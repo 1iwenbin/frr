@@ -205,6 +205,9 @@ void isis_area_proxy_show(struct vty *vty, const struct isis_area *area)
 			vty_out(vty, "  Mode: unset\n");
 			vty_out(vty, "  Proxy LSP: not generated\n");
 		}
+
+		vty_out(vty, "  SPF runs: L1=%llu L2=%llu\n",
+			area->spf_run_count[0], area->spf_run_count[1]);
 	}
 }
 
@@ -388,10 +391,10 @@ void isis_area_proxy_show_ready(struct vty *vty, struct isis_area *area)
 	}
 	if (missing == 0)
 		vty_out(vty, "  (none)\n");
-	vty_out(vty, "\nCounters: gen=%llu skip_nochange=%llu leader_chg=%llu ready_chg=%llu flood_filtered=%llu rx_snp=%llu rx_lsp=%llu\n",
+	vty_out(vty, "\nCounters: gen=%llu skip_nochange=%llu leader_chg=%llu ready_chg=%llu flood_filtered=%llu flood_event=%llu rx_snp=%llu rx_lsp=%llu\n",
 		area->ap_lsp_gen_count, area->ap_lsp_skip_nochange,
 		area->ap_leader_changes, area->ap_ready_changes,
-		area->ap_filtered_lsp_count,
+		area->ap_filtered_lsp_count, area->ap_flood_event_count,
 		area->ap_rx_snp_filtered, area->ap_rx_lsp_filtered);
 }
 

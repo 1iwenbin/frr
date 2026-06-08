@@ -1182,6 +1182,8 @@ dontcheckadj:
 						    lsp, circuit)) {
 						lsp->area
 							->ap_filtered_lsp_count++;
+						lsp->area
+							->ap_flood_event_count++;
 						ISIS_SET_FLAG(lsp->SSNflags,
 							      circuit);
 					} else {
@@ -1213,6 +1215,8 @@ dontcheckadj:
 						    lsp, circuit)) {
 						lsp->area
 							->ap_filtered_lsp_count++;
+						lsp->area
+							->ap_flood_event_count++;
 						ISIS_SET_FLAG(lsp->SSNflags,
 							      circuit);
 					} else {

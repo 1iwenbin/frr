@@ -2239,6 +2239,7 @@ void lsp_set_all_srmflags(struct isis_lsp *lsp, bool set)
 			if (!isis_area_proxy_lsp_should_flood(lsp, circuit)) {
 				if (set) {
 					lsp->area->ap_filtered_lsp_count++;
+					lsp->area->ap_flood_event_count++;
 					continue;
 				}
 			}
