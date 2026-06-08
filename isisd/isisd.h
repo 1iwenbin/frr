@@ -33,6 +33,7 @@
 #include "isisd/isis_circuit.h"
 #include "isisd/isis_sr.h"
 #include "isisd/isis_schedule.h"
+#include "hash.h"
 #include "isis_flags.h"
 #include "isis_lsp.h"
 #include "isis_lfa.h"
@@ -281,6 +282,9 @@ struct isis_area {
 	time_t ap_lsp_last_skip_time;          /* 最后一次 skip nochange 时间 */
 	uint64_t ap_rx_snp_filtered;           /* process_snp CSNP guard dropped */
 	uint64_t ap_rx_lsp_filtered;           /* process_lsp guard dropped */
+
+	/* ── RFC 9666 Proxy LSP identification ── */
+	struct hash *proxy_sysid_set;          /* known Proxy SysIDs from sub-TLV 28 */
 
 	/* ── RFC 9717 §6 Link Schedule Engine ── */
 	struct isis_schedule_ctx *schedule;

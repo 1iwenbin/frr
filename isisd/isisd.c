@@ -66,6 +66,7 @@
 #include "isisd/isis_nb.h"
 #include "isisd/isis_area_proxy.h"
 #include "isisd/isis_schedule.h"
+#include "hash.h"
 
 /* For debug statement. */
 unsigned long debug_adj_pkt;
@@ -367,6 +368,9 @@ struct isis_area *isis_area_create(const char *area_tag, const char *vrf_name)
 	/* RFC 9666: Default startup settle window */
 	area->proxy_lsp_settle_sec = 35;
 
+	/* RFC 9666: Proxy SysID identification set (lazy init) */
+	area->proxy_sysid_set = NULL;
+
 	/*
 	 * Default values
 	 */
@@ -529,6 +533,12 @@ void isis_area_destroy(struct isis_area *area)
 
 	if (fabricd)
 		fabricd_finish(area->fabricd);
+
+	/* RFC 9666: Clean up Proxy SysID set */
+	if (area->proxy_sysid_set) {
+		hash_clean(area->proxy_sysid_set, free);
+		hash_free(area->proxy_sysid_set);
+	}
 
 	/* RFC 9717 §6: Clean up schedule engine */
 	if (area->schedule)

@@ -1190,6 +1190,13 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 	area_proxy_debug("Area Proxy: reconcile, reasons=0x%x dirty=%d",
 			reasons, area->proxy_lsp_dirty);
 
+	/* ── Rebuild Proxy SysID set (lazy init + sub-TLV 28 scan) ── */
+	if (!area->proxy_sysid_set)
+		area->proxy_sysid_set = hash_create(
+			proxy_sysid_hash_key, proxy_sysid_hash_cmp,
+			"Proxy SysID set");
+	proxy_sysid_set_rebuild(area);
+
 	/* ── 4. Re-evaluate boundary circuits ── */
 	{
 		struct isis_circuit *circuit;
@@ -1887,7 +1894,59 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	return 0;
 }
 
-/* ── isis_lsp_is_proxy_lsp: 8.4 implementation (was in isis_lsp.c on 10.7) ── */
+/* ── Proxy SysID hash set: key is 6-byte System ID ── */
+struct proxy_sysid_key {
+	uint8_t sysid[ISIS_SYS_ID_LEN];
+};
+
+static unsigned int proxy_sysid_hash_key(const void *p)
+{
+	const struct proxy_sysid_key *k = p;
+	return (k->sysid[0] << 16) | (k->sysid[1] << 8) | k->sysid[2]
+	     ^ (k->sysid[3] << 16) | (k->sysid[4] << 8) | k->sysid[5];
+}
+
+static bool proxy_sysid_hash_cmp(const void *a, const void *b)
+{
+	return memcmp(((const struct proxy_sysid_key *)a)->sysid,
+		      ((const struct proxy_sysid_key *)b)->sysid,
+		      ISIS_SYS_ID_LEN) == 0;
+}
+
+/*
+ * Rebuild the Proxy SysID set from L2 LSDB sub-TLV 28.
+ * Called from reconciler to keep the set in sync.
+ */
+static void proxy_sysid_set_rebuild(struct isis_area *area)
+{
+	if (!area->proxy_sysid_set)
+		return;
+
+	hash_clean(area->proxy_sysid_set, free);
+
+	struct isis_lsp *lsp;
+	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp;
+	     lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
+		if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0)
+			continue;
+		if (!lsp->tlvs || !lsp->tlvs->router_cap)
+			continue;
+		if (!lsp->tlvs->router_cap->has_area_proxy_sysid)
+			continue;
+
+		struct proxy_sysid_key *key =
+			XCALLOC(MTYPE_TMP, sizeof(*key));
+		memcpy(key->sysid,
+		       lsp->tlvs->router_cap->proxy_sysid,
+		       ISIS_SYS_ID_LEN);
+		hash_get(area->proxy_sysid_set, key, NULL);
+	}
+}
+
+/* ── isis_lsp_is_proxy_lsp ──
+ * Identify Proxy LSPs by TLV-driven set (sub-TLV 28), with
+ * prefix-match fallback for startup before the set is populated.
+ */
 bool isis_lsp_is_proxy_lsp(const struct isis_lsp *lsp)
 {
 	if (!lsp || !lsp->area)
@@ -1895,13 +1954,15 @@ bool isis_lsp_is_proxy_lsp(const struct isis_lsp *lsp)
 	if (!lsp->area->area_proxy_enabled)
 		return false;
 
-	/*
-	 * RFC 9666: Proxy SysIDs use the format ffff.0000.XXXX where
-	 * the first 6 bytes are always 0xff 0xff 0x00 0x00 0x00.
-	 * We match any Proxy LSP, not just this Area's own, so that
-	 * foreign Proxy LSPs are correctly classified as PROXY (rather
-	 * than OUTSIDE_REAL) and flood without restriction.
-	 */
+	/* Primary: TLV-driven hash set */
+	if (lsp->area->proxy_sysid_set) {
+		struct proxy_sysid_key key;
+		memcpy(key.sysid, lsp->hdr.lsp_id, ISIS_SYS_ID_LEN);
+		if (hash_lookup(lsp->area->proxy_sysid_set, &key))
+			return true;
+	}
+
+	/* Fallback: prefix match for startup / non-FFFF SysIDs */
 	static const uint8_t proxy_prefix[] = {0xff, 0xff, 0x00, 0x00, 0x00};
 	if (memcmp(lsp->hdr.lsp_id, proxy_prefix, sizeof(proxy_prefix)) == 0)
 		return true;
