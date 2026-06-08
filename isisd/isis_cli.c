@@ -3378,6 +3378,37 @@ DEFUN(no_area_proxy_elect_check_interval,
 	return CMD_SUCCESS;
 }
 
+DEFUN(area_proxy_settle,
+      area_proxy_settle_cmd,
+      "area-proxy settle (5-300)",
+      "IS-IS Area Proxy\n"
+      "Set startup settle window in seconds\n"
+      "Interval in seconds (5-300, default 35)\n")
+{
+	int idx = 2;
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
+
+	if (!area)
+		return CMD_WARNING;
+	area->proxy_lsp_settle_sec = (uint32_t)strtoul(argv[idx]->arg, NULL, 10);
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_area_proxy_settle,
+      no_area_proxy_settle_cmd,
+      "no area-proxy settle",
+      NO_STR
+      "IS-IS Area Proxy\n"
+      "Reset startup settle window to default (35s)\n")
+{
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
+
+	if (!area)
+		return CMD_WARNING;
+	area->proxy_lsp_settle_sec = 35;
+	return CMD_SUCCESS;
+}
+
 static const struct cmd_element satellite_schedule_load_cmd;
 static const struct cmd_element satellite_schedule_clear_cmd;
 
@@ -3530,6 +3561,8 @@ void isis_cli_init(void)
 	install_element(ISIS_NODE, &no_area_proxy_priority_cmd);
 	install_element(ISIS_NODE, &area_proxy_elect_check_interval_cmd);
 	install_element(ISIS_NODE, &no_area_proxy_elect_check_interval_cmd);
+	install_element(ISIS_NODE, &area_proxy_settle_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_settle_cmd);
 	/* RFC 9666 Area Proxy: Interface-level boundary marking */
 	install_element(INTERFACE_NODE, &isis_area_proxy_boundary_cmd);
 	install_element(INTERFACE_NODE, &no_isis_area_proxy_boundary_cmd);

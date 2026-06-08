@@ -39,7 +39,7 @@ void isis_area_proxy_enable(struct isis_area *area)
 	area->proxy_lsp_dirty = true;  /* trigger initial generation */
 	area->ap_pending_reasons = 0;
 	area->ap_reconcile_running = false;
-	area->proxy_lsp_settle_until = monotime(NULL) + 35;
+	area->proxy_lsp_settle_until = monotime(NULL) + area->proxy_lsp_settle_sec;
 	THREAD_OFF(area->t_area_proxy_reconcile);
 
 	zlog_info("Area Proxy: enabled on area %s (proxy-sysid: %pSY)",
@@ -956,7 +956,7 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
  * Reads election info (Type 27 area_leader_priority) from L2 LSDB —
  * election information is carried in Inside L2 LSPs on level-1-2 interfaces.
  *
- * Filters by L1 SPF reachability (BFS on L1 adjacency graph).
+ * Filters by L1 SPF reachability (direct SPF tree query).
  * This guarantees a single area-wide leader, not per-clique leaders.
  * Winner: highest priority, ties broken by highest System ID.
  */
@@ -1083,7 +1083,7 @@ static void isis_area_proxy_lsp_purge(struct isis_area *area)
  * Ready Check: verify all L1 SPF-reachable Inside Routers have Area
  * Proxy information in their L2 LSPs before generating the Proxy LSP.
  *
- * Uses L1 SPF reachable set (same BFS as am_i_leader).
+ * Uses L1 SPF reachable set (same SPF tree query as am_i_leader).
  * Dead nodes whose LSPs are still in LSDB but no longer in the L1
  * adjacency graph are correctly excluded.
  *
@@ -1134,7 +1134,7 @@ static bool isis_area_proxy_ready(struct isis_area *area)
  *
  * All triggers (adjacency change, LSP insert, config change) are
  * funnelled into one reconciler per area.  The reconciler:
- *   1. Defers during startup settle window (35s + jitter)
+ *   1. Defers during startup settle window (configurable, default 35s + jitter)
  *   2. Serialises execution via ap_reconcile_running guard
  *   3. Re-evaluates boundary circuits and edge-router cache
  *   4. Runs leader election (if enabled) + ready check

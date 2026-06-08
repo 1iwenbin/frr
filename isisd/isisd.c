@@ -364,6 +364,9 @@ struct isis_area *isis_area_create(const char *area_tag, const char *vrf_name)
 	/* RFC 9717 §6: Link schedule engine */
 	area->schedule = NULL; /* lazy init on first load */
 
+	/* RFC 9666: Default startup settle window */
+	area->proxy_lsp_settle_sec = 35;
+
 	/*
 	 * Default values
 	 */
