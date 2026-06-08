@@ -1139,6 +1139,55 @@ static bool isis_area_proxy_ready(struct isis_area *area)
 	return true;
 }
 
+/* ── Proxy SysID hash set: key is 6-byte System ID ── */
+struct proxy_sysid_key {
+	uint8_t sysid[ISIS_SYS_ID_LEN];
+};
+
+static unsigned int proxy_sysid_hash_key(const void *p)
+{
+	const struct proxy_sysid_key *k = p;
+	return ((k->sysid[0] << 16) | (k->sysid[1] << 8) | k->sysid[2])
+	     ^ ((k->sysid[3] << 16) | (k->sysid[4] << 8) | k->sysid[5]);
+}
+
+static bool proxy_sysid_hash_cmp(const void *a, const void *b)
+{
+	return memcmp(((const struct proxy_sysid_key *)a)->sysid,
+		      ((const struct proxy_sysid_key *)b)->sysid,
+		      ISIS_SYS_ID_LEN) == 0;
+}
+
+/*
+ * Rebuild the Proxy SysID set from L2 LSDB sub-TLV 28.
+ * Called from reconciler to keep the set in sync.
+ */
+static void proxy_sysid_set_rebuild(struct isis_area *area)
+{
+	if (!area->proxy_sysid_set)
+		return;
+
+	hash_clean(area->proxy_sysid_set, free);
+
+	struct isis_lsp *lsp;
+	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp;
+	     lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
+		if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0)
+			continue;
+		if (!lsp->tlvs || !lsp->tlvs->router_cap)
+			continue;
+		if (!lsp->tlvs->router_cap->has_area_proxy_sysid)
+			continue;
+
+		struct proxy_sysid_key *key =
+			XCALLOC(MTYPE_TMP, sizeof(*key));
+		memcpy(key->sysid,
+		       lsp->tlvs->router_cap->proxy_sysid,
+		       ISIS_SYS_ID_LEN);
+		hash_get(area->proxy_sysid_set, key, NULL);
+	}
+}
+
 /* ────────────────────────────────────────────
  * Area Proxy Reconciler — single-entry state machine
  *
@@ -1894,55 +1943,6 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	return 0;
 }
 
-/* ── Proxy SysID hash set: key is 6-byte System ID ── */
-struct proxy_sysid_key {
-	uint8_t sysid[ISIS_SYS_ID_LEN];
-};
-
-static unsigned int proxy_sysid_hash_key(const void *p)
-{
-	const struct proxy_sysid_key *k = p;
-	return (k->sysid[0] << 16) | (k->sysid[1] << 8) | k->sysid[2]
-	     ^ (k->sysid[3] << 16) | (k->sysid[4] << 8) | k->sysid[5];
-}
-
-static bool proxy_sysid_hash_cmp(const void *a, const void *b)
-{
-	return memcmp(((const struct proxy_sysid_key *)a)->sysid,
-		      ((const struct proxy_sysid_key *)b)->sysid,
-		      ISIS_SYS_ID_LEN) == 0;
-}
-
-/*
- * Rebuild the Proxy SysID set from L2 LSDB sub-TLV 28.
- * Called from reconciler to keep the set in sync.
- */
-static void proxy_sysid_set_rebuild(struct isis_area *area)
-{
-	if (!area->proxy_sysid_set)
-		return;
-
-	hash_clean(area->proxy_sysid_set, free);
-
-	struct isis_lsp *lsp;
-	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp;
-	     lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
-		if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0)
-			continue;
-		if (!lsp->tlvs || !lsp->tlvs->router_cap)
-			continue;
-		if (!lsp->tlvs->router_cap->has_area_proxy_sysid)
-			continue;
-
-		struct proxy_sysid_key *key =
-			XCALLOC(MTYPE_TMP, sizeof(*key));
-		memcpy(key->sysid,
-		       lsp->tlvs->router_cap->proxy_sysid,
-		       ISIS_SYS_ID_LEN);
-		hash_get(area->proxy_sysid_set, key, NULL);
-	}
-}
-
 /* ── isis_lsp_is_proxy_lsp ──
  * Identify Proxy LSPs by TLV-driven set (sub-TLV 28), with
  * prefix-match fallback for startup before the set is populated.
@@ -1958,7 +1958,7 @@ bool isis_lsp_is_proxy_lsp(const struct isis_lsp *lsp)
 	if (lsp->area->proxy_sysid_set) {
 		struct proxy_sysid_key key;
 		memcpy(key.sysid, lsp->hdr.lsp_id, ISIS_SYS_ID_LEN);
-		if (hash_lookup(lsp->area->proxy_sysid_set, &key))
+		if (hash_get(lsp->area->proxy_sysid_set, &key, NULL))
 			return true;
 	}
 
