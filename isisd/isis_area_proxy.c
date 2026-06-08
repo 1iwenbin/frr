@@ -24,12 +24,21 @@
 /* 8.4 compatibility macros for deprecated 10.7 list APIs */
 #define iso_address_list_first(al) ((al) && listhead(*(al)))
 
+/* Result of a leader election computation. */
+struct area_proxy_election_result {
+	uint8_t winner_sysid[ISIS_SYS_ID_LEN];
+	uint8_t winner_priority;
+	bool valid;   /* false → no candidates found */
+};
+
 /* ── Forward declarations ── */
 static bool am_i_leader(struct isis_area *area);
 static bool isis_area_proxy_ready(struct isis_area *area);
 static void isis_area_proxy_lsp_purge(struct isis_area *area);
 static void isis_area_proxy_reconcile_cb(struct thread *t);
 static bool area_proxy_lsp_fragment_valid(struct isis_lsp *lsp);
+static struct area_proxy_election_result
+area_proxy_election_compute(struct isis_area *area);
 
 void isis_area_proxy_enable(struct isis_area *area)
 {
@@ -953,13 +962,6 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
  * This guarantees a single area-wide leader, not per-clique leaders.
  * Winner: highest priority, ties broken by highest System ID.
  */
-
-/* Result of a leader election computation. */
-struct area_proxy_election_result {
-	uint8_t winner_sysid[ISIS_SYS_ID_LEN];
-	uint8_t winner_priority;
-	bool valid;   /* false → no candidates found */
-};
 
 /*
  * Compute the Area Leader by scanning L2 LSDB.
