@@ -10,6 +10,7 @@
 #include "vty.h"
 #include "command.h"
 #include "log.h"
+#include "hash.h"
 
 #include "isisd/isisd.h"
 #include "isisd/isis_area_proxy.h"
@@ -122,10 +123,16 @@ void isis_area_proxy_disable(struct isis_area *area)
 
 	zlog_info("Area Proxy: disabled on area %s", area->area_tag);
 
-	/* Purge Proxy LSP if we are the leader */
-	if (area->proxy_lsp[ISIS_LEVEL2 - 1]) {
-		isis_area_proxy_lsp_purge(area);
-		lsp_regenerate_schedule(area, ISIS_LEVEL2, 0);
+	/* Purge Proxy LSP if we are the leader.
+	 * Use lsp_search() instead of direct proxy_lsp[] access
+	 * to guard against dangling pointer (P6 hardening). */
+	{
+		uint8_t purge_id[ISIS_SYS_ID_LEN + 2] = {};
+		memcpy(purge_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
+		if (lsp_search(&area->lspdb[ISIS_LEVEL2 - 1], purge_id)) {
+			isis_area_proxy_lsp_purge(area);
+			lsp_regenerate_schedule(area, ISIS_LEVEL2, 0);
+		}
 	}
 
 	/* Regenerate L2 LSP to remove Area Proxy TLV */
@@ -621,8 +628,8 @@ bool isis_sysid_in_l1_lsdb(struct isis_area *area, const uint8_t *sysid)
 }
 
 /*
- * A simple entry for prefix aggregation: tracks the minimum metric
- * for each unique prefix.
+ * Prefix aggregation entry: deduplicate by prefix, keep minimum metric.
+ * Uses FRR hash table for O(1) lookup and unlimited capacity.
  */
 struct prefix_agg_entry {
 	struct prefix prefix;
@@ -630,30 +637,38 @@ struct prefix_agg_entry {
 	bool has_min;
 };
 
-#define PREFIX_AGG_MAX 1024
-
-struct prefix_agg_table {
-	struct prefix_agg_entry entries[PREFIX_AGG_MAX];
-	int count;
+/* Hash key: prefix itself */
+struct prefix_agg_key {
+	struct prefix prefix;
 };
 
-static struct prefix_agg_entry *prefix_agg_lookup(struct prefix_agg_table *tbl,
-						   const struct prefix *p)
+static unsigned int prefix_agg_hash_key(const void *p)
 {
-	for (int i = 0; i < tbl->count; i++) {
-		if (prefix_same(&tbl->entries[i].prefix, p))
-			return &tbl->entries[i];
-	}
-	return NULL;
+	const struct prefix_agg_key *key = p;
+	unsigned int h = 0;
+	int i;
+
+	h = (h * 31) + key->prefix.family;
+	h = (h * 31) + key->prefix.prefixlen;
+	for (i = 0; i < (key->prefix.prefixlen + 7) / 8 && i < 16; i++)
+		h = (h * 31) + key->prefix.u.val[i];
+	return h;
 }
 
-static struct prefix_agg_entry *prefix_agg_add(struct prefix_agg_table *tbl,
-						const struct prefix *p)
+static bool prefix_agg_hash_cmp(const void *a, const void *b)
 {
-	if (tbl->count >= PREFIX_AGG_MAX)
-		return NULL;
-	struct prefix_agg_entry *e = &tbl->entries[tbl->count++];
-	prefix_copy(&e->prefix, p);
+	const struct prefix_agg_key *ka = a;
+	const struct prefix_agg_key *kb = b;
+	return prefix_same(&ka->prefix, &kb->prefix);
+}
+
+static void *prefix_agg_hash_alloc(void *arg)
+{
+	struct prefix_agg_key *key = arg;
+	struct prefix_agg_entry *e;
+
+	e = XCALLOC(MTYPE_TMP, sizeof(*e));
+	prefix_copy(&e->prefix, &key->prefix);
 	e->min_metric = UINT32_MAX;
 	e->has_min = false;
 	return e;
@@ -673,29 +688,17 @@ static int proxy_aggregate_ip_reach_cb(const struct prefix *prefix,
 					struct isis_subtlvs *subtlvs,
 					void *arg)
 {
-	struct prefix_agg_table *tbl = arg;
-	struct prefix pfx_normalised;
+	struct hash *tbl = arg;
+	struct prefix_agg_key key;
+	struct prefix_agg_entry *e;
 
 	/* Normalise the pointer: copy into a real struct prefix so that
 	 * prefix_same() / prefix_copy() access the address at the correct
 	 * offset regardless of whether the original was struct prefix_ipv4
 	 * or struct prefix_ipv6. */
-	prefix_copy(&pfx_normalised, prefix);
+	prefix_copy(&key.prefix, prefix);
 
-	struct prefix_agg_entry *e = prefix_agg_lookup(tbl, &pfx_normalised);
-	if (!e) {
-		e = prefix_agg_add(tbl, &pfx_normalised);
-		if (!e) {
-			static bool warned = false;
-			if (!warned) {
-				zlog_warn("Area Proxy: prefix aggregation table full (%d entries), "
-					  "further prefixes will be dropped",
-					  PREFIX_AGG_MAX);
-				warned = true;
-			}
-			return LSP_ITER_CONTINUE;
-		}
-	}
+	e = hash_get(tbl, &key, prefix_agg_hash_alloc);
 
 	if (!e->has_min || metric < e->min_metric) {
 		e->min_metric = metric;
@@ -706,8 +709,34 @@ static int proxy_aggregate_ip_reach_cb(const struct prefix *prefix,
 }
 
 /*
+ * Hash iterate callback: write a collected prefix to Proxy LSP TLVs.
+ */
+static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
+{
+	struct prefix_agg_entry *e = hb->data;
+	struct isis_tlvs *proxy_tlvs = arg;
+
+	if (!e->has_min)
+		return;
+
+	if (e->prefix.family == AF_INET) {
+		struct prefix_ipv4 *p4 = (struct prefix_ipv4 *)&e->prefix;
+		isis_tlvs_add_extended_ip_reach(
+			proxy_tlvs, p4, e->min_metric, false, NULL);
+	} else if (e->prefix.family == AF_INET6) {
+		struct prefix_ipv6 p6 = {
+			.family = AF_INET6,
+			.prefixlen = e->prefix.prefixlen,
+			.prefix = e->prefix.u.prefix6,
+		};
+		isis_tlvs_add_ipv6_reach(
+			proxy_tlvs, ISIS_MT_IPV4_UNICAST,
+			&p6, e->min_metric, false, NULL);
+	}
+}
+
+/*
  * Step 1~6: Aggregate L1 LSDB into a single Proxy LSP's TLVs.
- *
  *   Step 1 — Basic TLVs (Protocols Supported, Area Addresses, Hostname)
  *   Step 2 — Boundary IS Neighbors (Inside Edge → Outside Edge only)
  *   Step 3 — IP Reachability (min metric per prefix)
@@ -829,7 +858,9 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 	 * ================================================================ */
 
 	{
-		struct prefix_agg_table pat = {};
+		struct hash *pat = hash_create(prefix_agg_hash_key,
+					       prefix_agg_hash_cmp,
+					       "Proxy LSP prefix agg");
 
 		/* Collect from L1 LSDB */
 		struct isis_lsp *lsp;
@@ -840,38 +871,16 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 
 			isis_lsp_iterate_ip_reach(
 				lsp, AF_INET, ISIS_MT_IPV4_UNICAST,
-				proxy_aggregate_ip_reach_cb, &pat);
+				proxy_aggregate_ip_reach_cb, pat);
 			isis_lsp_iterate_ip_reach(
 				lsp, AF_INET6, ISIS_MT_IPV4_UNICAST,
-				proxy_aggregate_ip_reach_cb, &pat);
+				proxy_aggregate_ip_reach_cb, pat);
 		}
 
 		/* Write collected prefixes to Proxy LSP */
-		for (int i = 0; i < pat.count; i++) {
-			struct prefix_agg_entry *e = &pat.entries[i];
-			if (!e->has_min)
-				continue;
-
-			if (e->prefix.family == AF_INET) {
-				struct prefix_ipv4 *p4 =
-					(struct prefix_ipv4 *)&e->prefix;
-				isis_tlvs_add_extended_ip_reach(
-					proxy_tlvs, p4, e->min_metric,
-					false, NULL);
-			} else if (e->prefix.family == AF_INET6) {
-				/* Build a proper struct prefix_ipv6 — do not
-				 * cast from struct prefix because their
-				 * internal address offsets differ (8 vs 4). */
-				struct prefix_ipv6 p6 = {
-					.family = AF_INET6,
-					.prefixlen = e->prefix.prefixlen,
-					.prefix = e->prefix.u.prefix6,
-				};
-				isis_tlvs_add_ipv6_reach(
-					proxy_tlvs, ISIS_MT_IPV4_UNICAST,
-					&p6, e->min_metric, false, NULL);
-			}
-		}
+		hash_iterate(pat, prefix_agg_write_cb, proxy_tlvs);
+		hash_clean(pat, free);
+		hash_free(pat);
 	}
 
 	/* ================================================================
