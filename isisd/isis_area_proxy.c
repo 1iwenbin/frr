@@ -1199,6 +1199,7 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 	uint32_t next_interval;
 
 	area->t_area_proxy_reconcile = NULL;
+	area->ap_reconcile_fast_pending = false;
 
 	/* ── 1. Startup settle: defer all actual work ── */
 	if (monotime(NULL) < area->proxy_lsp_settle_until) {
@@ -1412,6 +1413,7 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 	/* ── 7. If new reasons arrived during execution, reschedule fast ── */
 	if (area->ap_pending_reasons) {
 		uint32_t jitter = (uint32_t)(random() % 3);
+		area->ap_reconcile_fast_pending = true;
 		thread_add_timer(master, isis_area_proxy_reconcile_cb,
 				area, 1 + jitter,
 				&area->t_area_proxy_reconcile);
@@ -1437,7 +1439,14 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
  * Sets the pending reason bitmask and schedules the reconciler.
  * If reconcile is already running, just set the flag (the callback
  * will pick it up at the end of the current cycle and reschedule).
- * If a timer is already pending, the reasons accumulate.
+ *
+ * Timer guard semantics:
+ *   - If no timer is pending, create one with delay based on reason.
+ *   - If a long-period timer (e.g. 900s periodic) is pending and a
+ *     high-priority event (LSP/ADJ change) arrives, cancel the old
+ *     timer and reschedule with a short 3~7s delay.
+ *   - If a fast debounce timer is already pending, just accumulate
+ *     reasons (do not keep pushing the timer back).
  */
 void isis_area_proxy_schedule_reconcile(struct isis_area *area, uint32_t reason)
 {
@@ -1452,9 +1461,20 @@ void isis_area_proxy_schedule_reconcile(struct isis_area *area, uint32_t reason)
 	if (area->ap_reconcile_running)
 		return;
 
-	/* Timer already pending → reasons accumulate */
-	if (area->t_area_proxy_reconcile)
-		return;
+	/* ── Timer guard with priority-aware preemption ── */
+	if (area->t_area_proxy_reconcile) {
+		if ((reason & (AP_REASON_LSP_CHANGE | AP_REASON_ADJ_CHANGE))
+		    && !area->ap_reconcile_fast_pending) {
+			/* Preempt: cancel long-period timer, reschedule fast */
+			THREAD_OFF(area->t_area_proxy_reconcile);
+			area->ap_reconcile_fast_pending = true;
+			/* fall through to schedule */
+		} else {
+			/* Already a fast timer pending, or low-priority
+			 * reason → just accumulate, don't push back */
+			return;
+		}
+	}
 
 	/* Calculate delay based on trigger type */
 	if (monotime(NULL) < area->proxy_lsp_settle_until) {
@@ -1463,6 +1483,7 @@ void isis_area_proxy_schedule_reconcile(struct isis_area *area, uint32_t reason)
 			+ (uint32_t)(random() % 15);
 	} else if (reason & (AP_REASON_ADJ_CHANGE | AP_REASON_LSP_CHANGE)) {
 		delay = 3 + (uint32_t)(random() % 5);
+		area->ap_reconcile_fast_pending = true;
 	} else if (reason & AP_REASON_INITIAL) {
 		delay = 5 + (uint32_t)(random() % 10);
 	} else {

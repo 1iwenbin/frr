@@ -1503,6 +1503,19 @@ static int lsp_regenerate(struct isis_area *area, int level)
 	lsp->hdr.rem_lifetime = rem_lifetime;
 	lsp->last_generated = time(NULL);
 	lsp_flood(lsp, NULL);
+
+	/* RFC 9666: own L1 LSP content change → trigger Area Proxy reconcile.
+	 * (External LSP changes are handled in lsp_insert().)
+	 * Only fragment 0 — the zero LSP carries the full prefix set. */
+	if (lsp->area->area_proxy_enabled
+	    && level == IS_LEVEL_1
+	    && LSP_FRAGMENT(lsp->hdr.lsp_id) == 0) {
+		lsp->area->proxy_lsp_dirty = true;
+		zlog_debug("Area Proxy: own L1 LSP changed, scheduling reconcile");
+		isis_area_proxy_schedule_reconcile(lsp->area,
+						   AP_REASON_LSP_CHANGE);
+	}
+
 	area->lsp_gen_count[level - 1]++;
 	for (ALL_LIST_ELEMENTS_RO(lsp->lspu.frags, node, frag)) {
 		if (!frag->tlvs) {

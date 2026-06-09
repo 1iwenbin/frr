@@ -257,6 +257,8 @@ struct isis_area {
 	/* ── Area Proxy reconciler (single-entry state machine) ── */
 	uint32_t ap_pending_reasons;           /* bitmask of enum area_proxy_reason */
 	bool ap_reconcile_running;             /* reentrancy guard for reconcile_cb */
+	bool ap_reconcile_fast_pending;        /* current pending timer is a fast debounce
+	                                          (LSP/ADJ change), not periodic */
 	struct thread *t_area_proxy_reconcile; /* single reconciler timer per area */
 	bool proxy_lsp_dirty;                  /* LSDB changed since last generate */
 	time_t proxy_lsp_settle_until;         /* startup settle: defer reconcile */
