@@ -586,6 +586,22 @@ void lsp_update(struct isis_lsp *lsp, struct isis_lsp_hdr *hdr,
 		isis_spf_schedule(lsp->area, lsp->level);
 		isis_te_lsp_event(lsp, LSP_UPD);
 	}
+
+	/*
+	 * RFC 9666: L1 LSDB update (new seqno for existing LSP) may
+	 * add new prefixes or boundary neighbors.  Mark Proxy LSP
+	 * dirty and schedule reconcile if not already pending.
+	 *
+	 * (New LSP arrivals are handled in lsp_insert().)
+	 */
+	if (lsp->area->area_proxy_enabled &&
+	    !isis_lsp_is_proxy_lsp(lsp) &&
+	    lsp->hdr.seqno != 0 &&
+	    lsp->hdr.rem_lifetime != 0) {
+		lsp->area->proxy_lsp_dirty = true;
+		isis_area_proxy_schedule_reconcile(lsp->area,
+						   AP_REASON_LSP_CHANGE);
+	}
 }
 
 /* creation of LSP directly from what we received */
