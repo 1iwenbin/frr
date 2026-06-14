@@ -179,9 +179,12 @@ void isis_area_proxy_show(struct vty *vty, const struct isis_area *area)
 			area->area_proxy_sysid[0], area->area_proxy_sysid[1],
 			area->area_proxy_sysid[2], area->area_proxy_sysid[3],
 			area->area_proxy_sysid[4], area->area_proxy_sysid[5]);
-		if (area->area_proxy_sid)
-			vty_out(vty, "  Area SID: %u\n",
-				area->area_proxy_sid);
+		if (area->area_proxy_sid) {
+			vty_out(vty, "  Area SID: %u (%s)\n",
+				area->area_proxy_sid,
+				(area->area_sid_type == SR_SID_VALUE_TYPE_ABSOLUTE)
+					? "absolute" : "index");
+		}
 
 		/* Mode */
 		if (area->area_proxy_leader_election) {
@@ -576,8 +579,11 @@ int isis_area_proxy_set_sid(struct isis_area *area, uint32_t sid)
 		return -1;
 
 	area->area_proxy_sid = sid;
+	area->area_sid_enabled = true;
+	area->area_sid_type = SR_SID_VALUE_TYPE_INDEX;  /* default: index */
+	area->area_sid_flags = 0;
 
-	zlog_info("Area Proxy: set area-sid to %u on area %s",
+	zlog_info("Area Proxy: set area-sid to %u (index) on area %s",
 		  sid, area->area_tag);
 
 	/* Trigger reconcile to regenerate Proxy LSP */
@@ -592,6 +598,9 @@ int isis_area_proxy_unset_sid(struct isis_area *area)
 		return -1;
 
 	area->area_proxy_sid = 0;
+	area->area_sid_enabled = false;
+	area->area_sid_type = 0;
+	area->area_sid_flags = 0;
 
 	zlog_info("Area Proxy: unset area-sid on area %s", area->area_tag);
 
@@ -620,13 +629,21 @@ bool isis_sysid_in_l1_lsdb(struct isis_area *area, const uint8_t *sysid)
 }
 
 /*
- * Prefix aggregation entry: deduplicate by prefix, keep minimum metric.
+ * Prefix aggregation entry: deduplicate by prefix, keep minimum metric
+ * and Prefix-SID (consensus strategy: keep only if all occurrences agree).
  * Uses FRR hash table for O(1) lookup and unlimited capacity.
  */
 struct prefix_agg_entry {
 	struct prefix prefix;
 	uint32_t min_metric;
 	bool has_min;
+
+	/* Prefix-SID (RFC 8667): consensus across all L1 nodes.
+	 * Propagated through Proxy LSP only if !sid_conflict. */
+	bool has_sid;
+	bool sid_conflict;
+	uint32_t sid_value;   /* index or absolute value */
+	uint8_t sid_flags;    /* ISIS_PREFIX_SID_* flags */
 };
 
 /* Hash key: prefix itself */
@@ -669,6 +686,11 @@ static void *prefix_agg_hash_alloc(void *arg)
 /*
  * Callback: collect IP prefixes from L1 LSDB.
  *
+ * Collects minimum metric and Prefix-SID (consensus strategy).
+ * If multiple L1 nodes advertise the same prefix with conflicting
+ * Prefix-SID values, the SID is dropped (not propagated through
+ * Proxy LSP) and a warning is logged.
+ *
  * NOTE: isis_lsp_iterate_ip_reach() passes (struct prefix *) cast from
  * struct prefix_ipv6, whose internal layout differs from struct prefix
  * (address field at offset 4 vs offset 8).  We must normalise to a
@@ -697,11 +719,39 @@ static int proxy_aggregate_ip_reach_cb(const struct prefix *prefix,
 		e->has_min = true;
 	}
 
+	/* Collect Prefix-SID (consensus strategy). */
+	if (subtlvs && subtlvs->prefix_sids.head) {
+		struct isis_prefix_sid *psid =
+			(struct isis_prefix_sid *)subtlvs->prefix_sids.head;
+
+		if (!e->has_sid) {
+			/* First occurrence — record. */
+			e->has_sid = true;
+			e->sid_value = psid->value;
+			e->sid_flags = psid->flags;
+		} else if (!e->sid_conflict) {
+			/* Subsequent occurrence — check consensus. */
+			if (e->sid_value != psid->value ||
+			    e->sid_flags != psid->flags) {
+				e->sid_conflict = true;
+				zlog_warn("Area Proxy: prefix %pFX Prefix-SID conflict: "
+					  "value=%u flags=0x%02x vs value=%u flags=0x%02x, dropping",
+					  prefix, e->sid_value, e->sid_flags,
+					  psid->value, psid->flags);
+			}
+		}
+	}
+
 	return LSP_ITER_CONTINUE;
 }
 
 /*
  * Hash iterate callback: write a collected prefix to Proxy LSP TLVs.
+ *
+ * Prefix-SID is propagated only if all L1 nodes agree on the same
+ * SID value and flags (consensus strategy).  If a conflict was
+ * detected, the prefix is written without Prefix-SID to avoid
+ * publishing an incorrect label mapping.
  */
 static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
 {
@@ -711,10 +761,43 @@ static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
 	if (!e->has_min)
 		return;
 
+	/* Construct Prefix-SID config if consensus holds. */
+	struct sr_prefix_cfg sid_cfg = {};
+	struct sr_prefix_cfg *pcfg = NULL;
+
+	if (e->has_sid && !e->sid_conflict) {
+		sid_cfg.sid = e->sid_value;
+		sid_cfg.n_flag_clear = false;
+
+		/* Reverse-map isis_prefix_sid flags → sr_prefix_cfg fields */
+		if (e->sid_flags & ISIS_PREFIX_SID_VALUE)
+			sid_cfg.sid_type = SR_SID_VALUE_TYPE_ABSOLUTE;
+		else
+			sid_cfg.sid_type = SR_SID_VALUE_TYPE_INDEX;
+
+		if (e->sid_flags & ISIS_PREFIX_SID_NODE)
+			sid_cfg.node_sid = true;
+		else
+			sid_cfg.node_sid = false;
+
+		if ((e->sid_flags & ISIS_PREFIX_SID_NO_PHP) &&
+		    (e->sid_flags & ISIS_PREFIX_SID_EXPLICIT_NULL))
+			sid_cfg.last_hop_behavior =
+				SR_LAST_HOP_BEHAVIOR_EXP_NULL;
+		else if (e->sid_flags & ISIS_PREFIX_SID_NO_PHP)
+			sid_cfg.last_hop_behavior =
+				SR_LAST_HOP_BEHAVIOR_NO_PHP;
+		else
+			sid_cfg.last_hop_behavior =
+				SR_LAST_HOP_BEHAVIOR_PHP;
+
+		pcfg = &sid_cfg;
+	}
+
 	if (e->prefix.family == AF_INET) {
 		struct prefix_ipv4 *p4 = (struct prefix_ipv4 *)&e->prefix;
 		isis_tlvs_add_extended_ip_reach(
-			proxy_tlvs, p4, e->min_metric, false, NULL);
+			proxy_tlvs, p4, e->min_metric, false, pcfg);
 	} else if (e->prefix.family == AF_INET6) {
 		struct prefix_ipv6 p6 = {
 			.family = AF_INET6,
@@ -723,7 +806,7 @@ static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
 		};
 		isis_tlvs_add_ipv6_reach(
 			proxy_tlvs, ISIS_MT_IPV4_UNICAST,
-			&p6, e->min_metric, false, NULL);
+			&p6, e->min_metric, false, pcfg);
 	}
 }
 
@@ -939,11 +1022,27 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 	 * ================================================================ */
 
 	/* ================================================================
-	 * STEP 6: Area SID — implemented via Area Proxy TLV (Type 20).
-	 * Encoded/decoded during isis_pack_tlvs/isis_unpack_tlvs.
-	 * The area_sid value from area_proxy configuration is stored in
-	 * the TLV and accessible to Outside Routers for SR anycast.
+	 * STEP 6: Area SID — Type 20 Area Proxy TLV.
+	 *
+	 * Publishes the Area SID as a property of the Proxy Area
+	 * (not of any individual prefix).  This enables external
+	 * routers to address the entire Area as a single SR node
+	 * for hierarchical TE and anycast entry.
 	 * ================================================================ */
+
+	if (area->area_sid_enabled) {
+		struct isis_area_proxy_tlv ap_tlv = {};
+
+		memcpy(ap_tlv.proxy_sysid, area->area_proxy_sysid,
+		       ISIS_SYS_ID_LEN);
+		ap_tlv.has_proxy_sysid = true;
+		ap_tlv.has_area_sid = true;
+		ap_tlv.area_sid_algo = SR_ALGORITHM_SPF;
+		ap_tlv.area_sid_value = area->area_proxy_sid;
+		ap_tlv.area_sid_flags = area->area_sid_flags;
+
+		isis_tlvs_set_area_proxy(proxy_tlvs, &ap_tlv);
+	}
 
 	return proxy_tlvs;
 }

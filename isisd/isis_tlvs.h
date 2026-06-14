@@ -223,6 +223,22 @@ struct isis_router_cap {
 	uint8_t msd;
 };
 
+/* RFC 9666 Area Proxy TLV (Type 20, oaemu extension) */
+#define ISIS_AREA_SID_FLAG_VALUE   0x80  /* absolute label */
+#define ISIS_AREA_SID_FLAG_LOCAL   0x40  /* local significance */
+
+struct isis_area_proxy_tlv {
+	/* Sub-TLV 1: Proxy System ID */
+	bool has_proxy_sysid;
+	uint8_t proxy_sysid[ISIS_SYS_ID_LEN];
+
+	/* Sub-TLV 2: Area SID */
+	bool has_area_sid;
+	uint8_t area_sid_flags;
+	uint8_t area_sid_algo;
+	uint32_t area_sid_value;
+};
+
 struct isis_item {
 	struct isis_item *next;
 };
@@ -323,6 +339,7 @@ struct isis_tlvs {
 	struct isis_threeway_adj *threeway_adj;
 	struct isis_router_cap *router_cap;
 	struct isis_spine_leaf *spine_leaf;
+	struct isis_area_proxy_tlv *area_proxy;  /* Type 20 */
 };
 
 enum isis_tlv_context {
@@ -351,6 +368,10 @@ enum isis_tlv_type {
 	ISIS_TLV_LSP_ENTRY = 9,
 	ISIS_TLV_AUTH = 10,
 	ISIS_TLV_PURGE_ORIGINATOR = 13,
+
+	/* RFC 9666 Area Proxy TLV (oaemu extension) */
+	ISIS_TLV_AREA_PROXY = 20,
+
 	ISIS_TLV_EXTENDED_REACH = 22,
 
 	ISIS_TLV_OLDSTYLE_IP_REACH = 128,
@@ -419,6 +440,8 @@ enum isis_tlv_type {
 	ISIS_SUBTLV_AREA_LEADER = 27,
 	/* RFC 9667 Area Proxy System Identifier */
 	ISIS_SUBTLV_AREA_PROXY_SYSID = 28,
+	/* RFC 9666 Area Proxy Area SID (oaemu extension, inside TLV 20) */
+	ISIS_SUBTLV_AREA_PROXY_SID = 29,
 
 	ISIS_SUBTLV_MAX = 40
 };
@@ -452,6 +475,7 @@ enum ext_subtlv_size {
 	ISIS_SUBTLV_DEF_SIZE = 4,
 	ISIS_SUBTLV_AREA_LEADER_SIZE = 3,
 ISIS_SUBTLV_AREA_PROXY_SYSID_VALUE_SIZE = ISIS_SYS_ID_LEN,
+	ISIS_SUBTLV_AREA_SID_SIZE = 6,  /* flags(1) + algo(1) + value(4) */
 
 	ISIS_SUBTLV_MAX_SIZE = 180
 };
@@ -592,6 +616,8 @@ void isis_tlvs_set_dynamic_hostname(struct isis_tlvs *tlvs,
 				    const char *hostname);
 void isis_tlvs_set_router_capability(struct isis_tlvs *tlvs,
                      const struct isis_router_cap *cap);
+void isis_tlvs_set_area_proxy(struct isis_tlvs *tlvs,
+			      const struct isis_area_proxy_tlv *ap_tlv);
 struct isis_router_cap *
 isis_tlvs_init_router_capability(struct isis_tlvs *tlvs);
 void isis_tlvs_set_te_router_id(struct isis_tlvs *tlvs,

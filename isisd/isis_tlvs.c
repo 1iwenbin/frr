@@ -3374,6 +3374,152 @@ out:
 	return 1;
 }
 
+/* Functions related to TLV 20 Area Proxy (RFC 9666, oaemu extension) */
+
+static int pack_tlv_area_proxy(const struct isis_area_proxy_tlv *ap,
+			       struct stream *s)
+{
+	size_t tlv_len;
+	size_t len_pos;
+
+	if (!ap || !ap->has_proxy_sysid)
+		return 0;
+
+	/* Sub-TLV 1 (Proxy SysID): 2 + 6 = 8 bytes.
+	 * Sub-TLV 2 (Area SID):    2 + 6 = 8 bytes (if present). */
+	tlv_len = 2 + ISIS_SYS_ID_LEN;
+	if (ap->has_area_sid)
+		tlv_len += 2 + ISIS_SUBTLV_AREA_SID_SIZE;
+
+	if (STREAM_WRITEABLE(s) < (unsigned int)(2 + tlv_len))
+		return 1;
+
+	stream_putc(s, ISIS_TLV_AREA_PROXY);
+	len_pos = stream_get_endp(s);
+	stream_putc(s, tlv_len);  /* placeholder, correct value below */
+
+	/* Sub-TLV 1: Proxy System ID */
+	stream_putc(s, ISIS_SUBTLV_AREA_PROXY_SYSID);
+	stream_putc(s, ISIS_SYS_ID_LEN);
+	stream_write(s, ap->proxy_sysid, ISIS_SYS_ID_LEN);
+
+	/* Sub-TLV 2: Area SID */
+	if (ap->has_area_sid) {
+		stream_putc(s, ISIS_SUBTLV_AREA_PROXY_SID);
+		stream_putc(s, ISIS_SUBTLV_AREA_SID_SIZE);
+		stream_putc(s, ap->area_sid_flags);
+		stream_putc(s, ap->area_sid_algo);
+		stream_putl(s, ap->area_sid_value);
+	}
+
+	/* Fix up real TLV length */
+	tlv_len = stream_get_endp(s) - len_pos - 1;
+	stream_putc_at(s, len_pos, tlv_len);
+
+	return 0;
+}
+
+static struct isis_area_proxy_tlv *
+copy_tlv_area_proxy(const struct isis_area_proxy_tlv *ap)
+{
+	struct isis_area_proxy_tlv *rv;
+
+	if (!ap)
+		return NULL;
+
+	rv = XCALLOC(MTYPE_ISIS_TLV, sizeof(*rv));
+	*rv = *ap;
+	return rv;
+}
+
+static void free_tlv_area_proxy(struct isis_area_proxy_tlv *ap)
+{
+	XFREE(MTYPE_ISIS_TLV, ap);
+}
+
+static int unpack_tlv_area_proxy(enum isis_tlv_context context,
+				 uint8_t tlv_type, uint8_t tlv_len,
+				 struct stream *s, struct sbuf *log, void *dest,
+				 int indent)
+{
+	struct isis_tlvs *tlvs = dest;
+	struct isis_area_proxy_tlv *ap;
+	uint8_t sub_type, sub_len;
+	size_t consumed = 0;
+
+	sbuf_push(log, indent, "Unpacking Area Proxy TLV...\n");
+
+	if (tlvs->area_proxy) {
+		sbuf_push(log, indent,
+			  "WARNING: Area Proxy TLV present multiple times.\n");
+		stream_forward_getp(s, tlv_len);
+		return 0;
+	}
+
+	ap = XCALLOC(MTYPE_ISIS_TLV, sizeof(*ap));
+
+	while (consumed + 2 <= tlv_len) {
+		sub_type = stream_getc(s);
+		sub_len = stream_getc(s);
+		consumed += 2;
+
+		if (consumed + sub_len > tlv_len) {
+			sbuf_push(log, indent,
+				  "WARNING: Area Proxy sub-TLV length overflow\n");
+			stream_forward_getp(s, tlv_len - consumed);
+			goto done;
+		}
+
+		switch (sub_type) {
+		case ISIS_SUBTLV_AREA_PROXY_SYSID:
+			if (sub_len >= ISIS_SYS_ID_LEN) {
+				stream_get(ap->proxy_sysid, s, ISIS_SYS_ID_LEN);
+				ap->has_proxy_sysid = true;
+				if (sub_len > ISIS_SYS_ID_LEN)
+					stream_forward_getp(s, sub_len - ISIS_SYS_ID_LEN);
+			} else {
+				stream_forward_getp(s, sub_len);
+			}
+			break;
+		case ISIS_SUBTLV_AREA_PROXY_SID:
+			if (sub_len >= ISIS_SUBTLV_AREA_SID_SIZE) {
+				ap->area_sid_flags = stream_getc(s);
+				ap->area_sid_algo = stream_getc(s);
+				ap->area_sid_value = stream_getl(s);
+				ap->has_area_sid = true;
+				if (sub_len > ISIS_SUBTLV_AREA_SID_SIZE)
+					stream_forward_getp(s, sub_len - ISIS_SUBTLV_AREA_SID_SIZE);
+			} else {
+				stream_forward_getp(s, sub_len);
+			}
+			break;
+		default:
+			sbuf_push(log, indent,
+				  "Skipping unknown Area Proxy sub-TLV %hhu\n",
+				  sub_type);
+			stream_forward_getp(s, sub_len);
+			break;
+		}
+		consumed += sub_len;
+	}
+
+done:
+	tlvs->area_proxy = ap;
+	return 0;
+}
+
+void isis_tlvs_set_area_proxy(struct isis_tlvs *tlvs,
+			      const struct isis_area_proxy_tlv *ap_tlv)
+{
+	if (!tlvs || !ap_tlv)
+		return;
+
+	if (tlvs->area_proxy)
+		free_tlv_area_proxy(tlvs->area_proxy);
+
+	tlvs->area_proxy = copy_tlv_area_proxy(ap_tlv);
+}
+
 /* Functions related to TLV 242 Router Capability as per RFC7981 */
 static struct isis_router_cap *copy_tlv_router_cap(
 			       const struct isis_router_cap *router_cap)
@@ -4782,6 +4928,7 @@ void isis_free_tlvs(struct isis_tlvs *tlvs)
 		      &tlvs->mt_ipv6_reach);
 	free_tlv_threeway_adj(tlvs->threeway_adj);
 	free_tlv_router_cap(tlvs->router_cap);
+	free_tlv_area_proxy(tlvs->area_proxy);
 	free_tlv_spine_leaf(tlvs->spine_leaf);
 
 	XFREE(MTYPE_ISIS_TLV, tlvs);
@@ -4968,6 +5115,14 @@ static int pack_tlvs(struct isis_tlvs *tlvs, struct stream *stream,
 	if (fragment_tlvs) {
 		fragment_tlvs->router_cap =
 			copy_tlv_router_cap(tlvs->router_cap);
+	}
+
+	rv = pack_tlv_area_proxy(tlvs->area_proxy, stream);
+	if (rv)
+		return rv;
+	if (fragment_tlvs) {
+		fragment_tlvs->area_proxy =
+			copy_tlv_area_proxy(tlvs->area_proxy);
 	}
 
 	rv = pack_tlv_te_router_id(tlvs->te_router_id, stream);
@@ -5214,6 +5369,7 @@ ITEM_TLV_OPS(ipv6_address, "TLV 232 IPv6 Interface Address");
 ITEM_TLV_OPS(global_ipv6_address, "TLV 233 Global IPv6 Interface Address");
 ITEM_TLV_OPS(ipv6_reach, "TLV 236 IPv6 Reachability");
 TLV_OPS(router_cap, "TLV 242 Router Capability");
+TLV_OPS(area_proxy, "TLV 20 Area Proxy");
 
 ITEM_SUBTLV_OPS(prefix_sid, "Sub-TLV 3 SR Prefix-SID");
 SUBTLV_OPS(ipv6_source_prefix, "Sub-TLV 22 IPv6 Source Prefix");
@@ -5226,6 +5382,7 @@ static const struct tlv_ops *const tlv_table[ISIS_CONTEXT_MAX][ISIS_TLV_MAX] = {
 		[ISIS_TLV_LSP_ENTRY] = &tlv_lsp_entry_ops,
 		[ISIS_TLV_AUTH] = &tlv_auth_ops,
 		[ISIS_TLV_PURGE_ORIGINATOR] = &tlv_purge_originator_ops,
+		[ISIS_TLV_AREA_PROXY] = &tlv_area_proxy_ops,
 		[ISIS_TLV_EXTENDED_REACH] = &tlv_extended_reach_ops,
 		[ISIS_TLV_OLDSTYLE_IP_REACH] = &tlv_oldstyle_ip_reach_ops,
 		[ISIS_TLV_PROTOCOLS_SUPPORTED] = &tlv_protocols_supported_ops,

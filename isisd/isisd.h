@@ -251,7 +251,13 @@ struct isis_area {
 	/* ── RFC 9666 Area Proxy ── */
 	bool area_proxy_enabled;
 	uint8_t area_proxy_sysid[ISIS_SYS_ID_LEN];
-	uint32_t area_proxy_sid;
+
+	/* Area SID (oaemu extension, published via Type 20 TLV) */
+	bool area_sid_enabled;
+	uint32_t area_proxy_sid;                /* index or absolute label */
+	uint8_t area_sid_type;                  /* SR_SID_VALUE_TYPE_INDEX or ABSOLUTE */
+	uint8_t area_sid_flags;                 /* ISIS_AREA_SID_FLAG_* */
+
 	struct isis_lsp *proxy_lsp[ISIS_LEVELS];
 
 	/* ── Area Proxy reconciler (single-entry state machine) ── */
