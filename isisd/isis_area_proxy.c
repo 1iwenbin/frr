@@ -1247,6 +1247,16 @@ static bool proxy_sysid_hash_cmp(const void *a, const void *b)
 		      ISIS_SYS_ID_LEN) == 0;
 }
 
+static void *proxy_sysid_hash_alloc(void *arg)
+{
+	struct proxy_sysid_key *src = arg;
+	struct proxy_sysid_key *dst;
+
+	dst = XCALLOC(MTYPE_TMP, sizeof(*dst));
+	memcpy(dst->sysid, src->sysid, ISIS_SYS_ID_LEN);
+	return dst;
+}
+
 /*
  * Rebuild the Proxy SysID set from L2 LSDB sub-TLV 28.
  * Called from reconciler to keep the set in sync.
@@ -1268,12 +1278,12 @@ static void proxy_sysid_set_rebuild(struct isis_area *area)
 		if (!lsp->tlvs->router_cap->has_area_proxy_sysid)
 			continue;
 
-		struct proxy_sysid_key *key =
-			XCALLOC(MTYPE_TMP, sizeof(*key));
-		memcpy(key->sysid,
+		struct proxy_sysid_key key;
+		memcpy(key.sysid,
 		       lsp->tlvs->router_cap->proxy_sysid,
 		       ISIS_SYS_ID_LEN);
-		hash_get(area->proxy_sysid_set, key, NULL);
+		hash_get(area->proxy_sysid_set, &key,
+			 proxy_sysid_hash_alloc);
 	}
 }
 
