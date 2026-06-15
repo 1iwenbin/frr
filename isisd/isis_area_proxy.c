@@ -1830,10 +1830,10 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	memcpy(lsp_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
 	lsp_id[ISIS_SYS_ID_LEN] = 0; /* pseudo ID */
 
-	if (area->proxy_lsp[ISIS_LEVEL2 - 1] &&
-	    area_proxy_lsp_content_unchanged(area, fragments)) {
+	if (area_proxy_lsp_content_unchanged(area, fragments)) {
 		lsp0 = lsp_search(&area->lspdb[ISIS_LEVEL2 - 1], lsp_id);
-		if (lsp0 && lsp0->hdr.rem_lifetime >=
+		if (lsp0 && area_proxy_lsp_fragment_valid(lsp0) &&
+		    lsp0->hdr.rem_lifetime >=
 		    area->lsp_refresh[ISIS_LEVEL2 - 1]) {
 			zlog_debug("Area Proxy: content unchanged, skip regenerate");
 			area_proxy_fragment_list_free(fragments);
