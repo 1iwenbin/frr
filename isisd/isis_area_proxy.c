@@ -227,6 +227,38 @@ void isis_area_proxy_show(struct vty *vty, struct isis_area *area)
 
 		vty_out(vty, "  SPF runs: L1=%llu L2=%llu\n",
 			area->spf_run_count[0], area->spf_run_count[1]);
+
+		/* ── Remote Area SIDs (RFC 9666 §4.3.2) ── */
+		{
+			struct isis_lsp *lsp;
+			int remote_count = 0;
+
+			vty_out(vty, "  Remote Area SIDs:\n");
+			frr_each (lspdb, &area->lspdb[ISIS_LEVEL2 - 1], lsp) {
+				if (!isis_lsp_is_proxy_lsp(lsp))
+					continue;
+				if (memcmp(lsp->hdr.lsp_id,
+					   area->area_proxy_sysid,
+					   ISIS_SYS_ID_LEN) == 0)
+					continue; /* skip own Proxy LSP */
+				if (!lsp->tlvs ||
+				    !lsp->tlvs->area_proxy ||
+				    !lsp->tlvs->area_proxy->has_area_sid)
+					continue;
+
+				struct isis_area_proxy_tlv *ap =
+					lsp->tlvs->area_proxy;
+				vty_out(vty,
+					"    %pSY: SID=%u flags=0x%02x algo=%u\n",
+					ap->proxy_sysid,
+					ap->area_sid_value,
+					ap->area_sid_flags,
+					ap->area_sid_algo);
+				remote_count++;
+			}
+			if (remote_count == 0)
+				vty_out(vty, "    (none)\n");
+		}
 	}
 }
 
@@ -517,21 +549,18 @@ void isis_area_proxy_show_misconfig(struct vty *vty, struct isis_area *area)
 		if (lsp->tlvs->router_cap->area_leader_priority == 0)
 			continue;
 
-		if (!lsp->tlvs->router_cap->has_area_proxy_sysid) {
-			vty_out(vty, "  ⚠  Proxy SysID unknown (old format): %pSY (upgrade needed)\n",
+		if (!lsp->tlvs->area_proxy ||
+		    !lsp->tlvs->area_proxy->has_proxy_sysid) {
+			vty_out(vty, "  ⚠  Proxy SysID unknown (no Type 20 TLV): %pSY (upgrade needed)\n",
 				lsp->hdr.lsp_id);
 			issues++;
-		} else if (memcmp(lsp->tlvs->router_cap->proxy_sysid,
+		} else if (memcmp(lsp->tlvs->area_proxy->proxy_sysid,
 				  area->area_proxy_sysid,
 				  ISIS_SYS_ID_LEN) != 0) {
-			vty_out(vty, "  ⚠  Proxy SysID mismatch: %pSY advertises %02x%02x.%02x%02x.%02x%02x (local expects %pSY)\n",
+			struct isis_area_proxy_tlv *ap = lsp->tlvs->area_proxy;
+			vty_out(vty, "  ⚠  Proxy SysID mismatch: %pSY advertises %pSY (local expects %pSY)\n",
 				lsp->hdr.lsp_id,
-				lsp->tlvs->router_cap->proxy_sysid[0],
-				lsp->tlvs->router_cap->proxy_sysid[1],
-				lsp->tlvs->router_cap->proxy_sysid[2],
-				lsp->tlvs->router_cap->proxy_sysid[3],
-				lsp->tlvs->router_cap->proxy_sysid[4],
-				lsp->tlvs->router_cap->proxy_sysid[5],
+				ap->proxy_sysid,
 				area->area_proxy_sysid);
 			issues++;
 		}
@@ -770,14 +799,21 @@ static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
 		sid_cfg.n_flag_clear = false;
 
 		/*
-		 * RFC 9666 §4.4.7: In the Proxy LSP, the P-flag
-		 * (Readvertised) SHOULD be set even if the original
-		 * advertisement did not have it, and the E-flag
-		 * (No-PHP) SHOULD be reset to avoid PHP at the
-		 * proxy node.
+		 * RFC 9666 §4.4.7: R-flag (Readvertised) SHOULD
+		 * be set in the Proxy LSP.
+		 *
+		 * P-flag (No-PHP): intentionally NOT force-reset.
+		 * RFC 9666 §4.4.7 says P-flag SHOULD be reset to
+		 * avoid PHP at the proxy node.  However, in
+		 * satellite MPLS architectures the egress is a
+		 * ground station (abundant CPU), not a satellite
+		 * (constrained).  Preserving P-flag from the
+		 * consensus lets the ground station pop its own
+		 * label — all satellites remain pure MPLS, zero
+		 * IP FIB.  For prefixes without P-flag, PHP
+		 * proceeds normally.
 		 */
 		e->sid_flags |= ISIS_PREFIX_SID_READVERTISED;
-		e->sid_flags &= ~ISIS_PREFIX_SID_NO_PHP;
 
 		/* Reverse-map isis_prefix_sid flags → sr_prefix_cfg fields */
 		if (e->sid_flags & ISIS_PREFIX_SID_VALUE)
@@ -1283,14 +1319,13 @@ static void proxy_sysid_set_rebuild(struct isis_area *area)
 	     lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
 		if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0)
 			continue;
-		if (!lsp->tlvs || !lsp->tlvs->router_cap)
-			continue;
-		if (!lsp->tlvs->router_cap->has_area_proxy_sysid)
+		if (!lsp->tlvs || !lsp->tlvs->area_proxy ||
+		    !lsp->tlvs->area_proxy->has_proxy_sysid)
 			continue;
 
 		struct proxy_sysid_key key;
 		memcpy(key.sysid,
-		       lsp->tlvs->router_cap->proxy_sysid,
+		       lsp->tlvs->area_proxy->proxy_sysid,
 		       ISIS_SYS_ID_LEN);
 		hash_get(area->proxy_sysid_set, &key,
 			 proxy_sysid_hash_alloc);

@@ -1156,11 +1156,6 @@ static void lsp_build(struct isis_lsp *lsp, struct isis_area *area)
 		if (area->area_proxy_enabled &&
 		    area->area_proxy_leader_election)
 			cap.area_leader_priority = area->area_proxy_leader_priority;
-		if (area->area_proxy_enabled) {
-			memcpy(cap.proxy_sysid, area->area_proxy_sysid,
-			       ISIS_SYS_ID_LEN);
-			cap.has_area_proxy_sysid = true;
-		}
 
 		isis_tlvs_set_router_capability(lsp->tlvs, &cap);
 		lsp_debug("ISIS (%s): Adding Router Capabilities information",

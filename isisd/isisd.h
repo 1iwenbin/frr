@@ -127,6 +127,14 @@ struct lsp_refresh_arg {
 	int level;
 };
 
+/* RFC 9666 §4.3.2: Remote Area SID learned from a Proxy LSP Type 20 TLV */
+struct area_sid_entry {
+	uint8_t proxy_sysid[ISIS_SYS_ID_LEN];
+	uint32_t sid_value;
+	uint8_t sid_flags;
+	uint8_t sid_algo;
+};
+
 /* for yang configuration */
 enum isis_metric_style {
 	ISIS_NARROW_METRIC = 0,
@@ -293,6 +301,9 @@ struct isis_area {
 
 	/* ── RFC 9666 Proxy LSP identification ── */
 	struct hash *proxy_sysid_set;          /* known Proxy SysIDs from sub-TLV 28 */
+
+	/* ── RFC 9666 §4.3.2 Remote Area SIDs learned from Proxy LSPs ── */
+	struct list *remote_area_sids;         /* struct area_sid_entry */
 
 	/* ── RFC 9717 §6 Link Schedule Engine ── */
 	struct isis_schedule_ctx *schedule;

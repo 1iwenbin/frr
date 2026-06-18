@@ -3607,18 +3607,6 @@ static void format_tlv_router_cap_json(const struct isis_router_cap *router_cap,
 		json_object_int_add(json, "area-leader-priority",
 				 router_cap->area_leader_priority);
 
-	/* RFC 9667: Area Proxy System Identifier (sub-TLV 28) */
-	if (router_cap->has_area_proxy_sysid) {
-		char proxy_sysid_str[32];
-		snprintf(proxy_sysid_str, sizeof(proxy_sysid_str),
-			 "%02x%02x.%02x%02x.%02x%02x",
-			 router_cap->proxy_sysid[0], router_cap->proxy_sysid[1],
-			 router_cap->proxy_sysid[2], router_cap->proxy_sysid[3],
-			 router_cap->proxy_sysid[4], router_cap->proxy_sysid[5]);
-		json_object_string_add(json, "area-proxy-system-id",
-					proxy_sysid_str);
-	}
-
 	/* Segment Routing Node MSD as per RFC8491 section #2 */
 	if (router_cap->msd != 0)
 		json_object_int_add(json, "msd", router_cap->msd);
@@ -3670,18 +3658,6 @@ static void format_tlv_router_cap(const struct isis_router_cap *router_cap,
 	if (router_cap->area_leader_priority > 0)
 		sbuf_push(buf, indent, "  Area Leader Priority: %u\n",
 			 router_cap->area_leader_priority);
-
-	/* RFC 9667: Area Proxy System Identifier (sub-TLV 28) */
-	if (router_cap->has_area_proxy_sysid) {
-		char proxy_sysid_str[32];
-		snprintf(proxy_sysid_str, sizeof(proxy_sysid_str),
-			 "%02x%02x.%02x%02x.%02x%02x",
-			 router_cap->proxy_sysid[0], router_cap->proxy_sysid[1],
-			 router_cap->proxy_sysid[2], router_cap->proxy_sysid[3],
-			 router_cap->proxy_sysid[4], router_cap->proxy_sysid[5]);
-		sbuf_push(buf, indent, "  Area Proxy System ID: %s\n",
-			 proxy_sysid_str);
-	}
 
 	/* Segment Routing Node MSD as per RFC8491 section #2 */
 	if (router_cap->msd != 0)
@@ -3771,13 +3747,6 @@ static int pack_tlv_router_cap(const struct isis_router_cap *router_cap,
 		stream_putc(s, ISIS_SUBTLV_AREA_LEADER);
 		stream_putc(s, 1); /* Length: 1 byte */
 		stream_putc(s, router_cap->area_leader_priority);
-	}
-
-	/* RFC 9667: Area Proxy System Identifier Sub-TLV (Type 28) */
-	if (router_cap->has_area_proxy_sysid) {
-		stream_putc(s, ISIS_SUBTLV_AREA_PROXY_SYSID);
-		stream_putc(s, ISIS_SYS_ID_LEN); /* 6 bytes */
-		stream_write(s, router_cap->proxy_sysid, ISIS_SYS_ID_LEN);
 	}
 
 	/* Adjust TLV length which depends on subTLVs presence */
@@ -3982,16 +3951,6 @@ static int unpack_tlv_router_cap(enum isis_tlv_context context,
 				rcap->area_leader_priority = stream_getc(s);
 			if (length > 1)
 				stream_forward_getp(s, length - 1);
-			break;
-		case ISIS_SUBTLV_AREA_PROXY_SYSID:
-			/* RFC 9667: Area Proxy System Identifier (6 bytes) */
-			if (length == ISIS_SYS_ID_LEN) {
-				stream_get(rcap->proxy_sysid, s,
-					   ISIS_SYS_ID_LEN);
-				rcap->has_area_proxy_sysid = true;
-			}
-			if (length > ISIS_SYS_ID_LEN)
-				stream_forward_getp(s, length - ISIS_SYS_ID_LEN);
 			break;
 		default:
 			stream_forward_getp(s, length);

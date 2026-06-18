@@ -92,11 +92,30 @@ struct isis_sr_block *isis_sr_find_srgb(struct lspdb_head *lspdb,
 	if (!lsp)
 		return NULL;
 
-	if (!lsp->tlvs->router_cap
-	    || lsp->tlvs->router_cap->srgb.range_size == 0)
-		return NULL;
+	/* Primary: Router Capability SRGB (RFC 9666 Step 4). */
+	if (lsp->tlvs->router_cap
+	    && lsp->tlvs->router_cap->srgb.range_size > 0)
+		return &lsp->tlvs->router_cap->srgb;
 
-	return &lsp->tlvs->router_cap->srgb;
+	/* RFC 9666 §4.3.2 Fallback: Area SID from Type 20 TLV.
+	 * For Proxy LSPs advertising an Area SID without SRGB,
+	 * synthesize a 1-label "SRGB" from the Area SID value.
+	 * This lets external routers address the Area as a single
+	 * SR node.  The static buffer is safe because SPF runs
+	 * single-threaded in the IS-IS event loop.
+	 */
+	if (lsp->tlvs->area_proxy
+	    && lsp->tlvs->area_proxy->has_area_sid) {
+		static struct isis_sr_block area_sid_srgb;
+
+		area_sid_srgb.lower_bound =
+			lsp->tlvs->area_proxy->area_sid_value;
+		area_sid_srgb.range_size = 1;
+		area_sid_srgb.flags = 0;
+		return &area_sid_srgb;
+	}
+
+	return NULL;
 }
 
 /**
@@ -1020,7 +1039,7 @@ static void show_node(struct vty *vty, struct isis_area *area, int level)
 
 	/* Prepare table. */
 	tt = ttable_new(&ttable_styles[TTSTYLE_BLANK]);
-	ttable_add_row(tt, "System ID|SRGB|SRLB|Algorithm|MSD");
+	ttable_add_row(tt, "System ID|SRGB|SRLB|Algorithm|MSD|Area SID");
 	tt->style.cell.rpad = 2;
 	tt->style.corner = '+';
 	ttable_restyle(tt);
@@ -1035,14 +1054,24 @@ static void show_node(struct vty *vty, struct isis_area *area, int level)
 		if (!cap)
 			continue;
 
+		/* RFC 9666 §4.3.2: show Area SID for Proxy LSPs */
+		const char *area_sid_str = "-";
+		if (lsp->tlvs->area_proxy &&
+		    lsp->tlvs->area_proxy->has_area_sid) {
+			static char sid_buf[32];
+			snprintf(sid_buf, sizeof(sid_buf), "%u",
+				 lsp->tlvs->area_proxy->area_sid_value);
+			area_sid_str = sid_buf;
+		}
+
 		ttable_add_row(
-			tt, "%s|%u - %u|%u - %u|%s|%u",
+			tt, "%s|%u - %u|%u - %u|%s|%u|%s",
 			sysid_print(lsp->hdr.lsp_id), cap->srgb.lower_bound,
 			cap->srgb.lower_bound + cap->srgb.range_size - 1,
 			cap->srlb.lower_bound,
 			cap->srlb.lower_bound + cap->srlb.range_size - 1,
 			cap->algo[0] == SR_ALGORITHM_SPF ? "SPF" : "S-SPF",
-			cap->msd);
+			cap->msd, area_sid_str);
 	}
 
 	/* Dump the generated table. */

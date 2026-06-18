@@ -212,8 +212,6 @@ struct isis_router_cap {
 
 	/* RFC 9667 Area Leader */
 	uint8_t area_leader_priority;
-	bool has_area_proxy_sysid;
-	uint8_t proxy_sysid[ISIS_SYS_ID_LEN];
 
 	/* RFC 8667 section #3 */
 	struct isis_sr_block srgb;
@@ -438,10 +436,10 @@ enum isis_tlv_type {
 
 	/* RFC 9667 */
 	ISIS_SUBTLV_AREA_LEADER = 27,
-	/* RFC 9667 Area Proxy System Identifier */
-	ISIS_SUBTLV_AREA_PROXY_SYSID = 28,
-	/* RFC 9666 Area Proxy Area SID (oaemu extension, inside TLV 20) */
-	ISIS_SUBTLV_AREA_PROXY_SID = 29,
+	/* RFC 9666 Type 20 Area Proxy TLV sub-TLV 1: Proxy System ID */
+	ISIS_SUBTLV_AREA_PROXY_SYSID = 1,
+	/* RFC 9666 Type 20 Area Proxy TLV sub-TLV 2: Area SID */
+	ISIS_SUBTLV_AREA_PROXY_SID = 2,
 
 	ISIS_SUBTLV_MAX = 40
 };
