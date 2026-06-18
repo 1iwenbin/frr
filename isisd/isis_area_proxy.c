@@ -164,7 +164,7 @@ const uint8_t *isis_area_proxy_get_sysid(const struct isis_area *area)
 static bool am_i_leader(struct isis_area *area);
 static bool isis_area_proxy_ready(struct isis_area *area);
 
-void isis_area_proxy_show(struct vty *vty, const struct isis_area *area)
+void isis_area_proxy_show(struct vty *vty, struct isis_area *area)
 {
 	if (!area) {
 		vty_out(vty, "No IS-IS instance configured\n");
@@ -768,6 +768,16 @@ static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
 	if (e->has_sid && !e->sid_conflict) {
 		sid_cfg.sid = e->sid_value;
 		sid_cfg.n_flag_clear = false;
+
+		/*
+		 * RFC 9666 §4.4.7: In the Proxy LSP, the P-flag
+		 * (Readvertised) SHOULD be set even if the original
+		 * advertisement did not have it, and the E-flag
+		 * (No-PHP) SHOULD be reset to avoid PHP at the
+		 * proxy node.
+		 */
+		e->sid_flags |= ISIS_PREFIX_SID_READVERTISED;
+		e->sid_flags &= ~ISIS_PREFIX_SID_NO_PHP;
 
 		/* Reverse-map isis_prefix_sid flags → sr_prefix_cfg fields */
 		if (e->sid_flags & ISIS_PREFIX_SID_VALUE)
@@ -2285,6 +2295,52 @@ bool isis_area_proxy_lsp_should_flood(const struct isis_lsp *lsp,
 	case AP_LSP_SCOPE_UNCLASSIFIED:
 	default:
 		return true;
+	}
+}
+
+/*
+ * RFC 9666 §5.2: Remove Inside L2 LSP entries from SNP (CSNP/PSNP)
+ * entry lists on boundary circuits.
+ *
+ * The source address of CSNP/PSNP already uses the proxy-sysid;
+ * this function filters the content — LSP summaries whose SysID
+ * belongs to this Area's L1 LSDB (i.e. Inside Routers) must not
+ * appear in SNP PDUs sent over boundary circuits.
+ *
+ * Called by send_csnp() and send_psnp() after building the entry list.
+ */
+void isis_area_proxy_filter_snp_entries(struct isis_area *area,
+					struct isis_item_list *entries)
+{
+	struct isis_item *prev = NULL;
+	struct isis_item *item;
+	struct isis_item *next;
+
+	if (!area || !entries)
+		return;
+
+	for (item = entries->head; item; item = next) {
+		next = item->next;
+		struct isis_lsp_entry *e = (struct isis_lsp_entry *)item;
+
+		if (isis_sysid_in_l1_lsdb(area, e->id)) {
+			/* Unlink from singly-linked list. */
+			if (prev)
+				prev->next = next;
+			else
+				entries->head = next;
+
+			/* Adjust tail pointer (points to ->next of
+			 * the last element, or to &head if empty). */
+			if ((struct isis_item *)entries->tail == item)
+				entries->tail = prev ? &prev->next
+						     : &entries->head;
+
+			XFREE(MTYPE_TMP, e);
+			entries->count--;
+		} else {
+			prev = item;
+		}
 	}
 }
 

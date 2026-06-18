@@ -2272,6 +2272,19 @@ int send_csnp(struct isis_circuit *circuit, int level)
 		isis_tlvs_add_csnp_entries(tlvs, start, stop, num_lsps,
 					   &circuit->area->lspdb[level - 1],
 					   &last_lsp);
+
+		/*
+		 * RFC 9666 §5.2: filter Inside L2 LSP entries from
+		 * CSNP on boundary circuits.  The source address
+		 * already uses the proxy-sysid; this filters the
+		 * LSP summary content.
+		 */
+		if (circuit->is_area_proxy_boundary && circuit->area &&
+		    circuit->area->area_proxy_enabled &&
+		    level == ISIS_LEVEL2)
+			isis_area_proxy_filter_snp_entries(
+				circuit->area, &tlvs->lsp_entries);
+
 		/*
 		 * Update the stop lsp_id before encoding this CSNP.
 		 */
@@ -2439,8 +2452,20 @@ static int send_psnp(int level, struct isis_circuit *circuit)
 			isis_tlvs_add_auth(tlvs, passwd);
 
 		frr_each (lspdb, &circuit->area->lspdb[level - 1], lsp) {
-			if (ISIS_CHECK_FLAG(lsp->SSNflags, circuit))
+			if (ISIS_CHECK_FLAG(lsp->SSNflags, circuit)) {
+				/*
+				 * RFC 9666 §5.2: filter Inside L2 LSP
+				 * entries from PSNP on boundary circuits.
+				 */
+				if (circuit->is_area_proxy_boundary &&
+				    circuit->area &&
+				    circuit->area->area_proxy_enabled &&
+				    level == ISIS_LEVEL2 &&
+				    isis_sysid_in_l1_lsdb(circuit->area,
+					lsp->hdr.lsp_id))
+					continue;
 				isis_tlvs_add_lsp_entry(tlvs, lsp);
+			}
 
 			if (tlvs->lsp_entries.count == num_lsps)
 				break;

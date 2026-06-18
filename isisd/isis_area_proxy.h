@@ -55,6 +55,11 @@ isis_area_proxy_lsp_classify(const struct isis_lsp *lsp);
 extern bool isis_area_proxy_lsp_should_flood(const struct isis_lsp *lsp,
 					     struct isis_circuit *circuit);
 
+/* RFC 9666 §5.2: filter Inside L2 LSP entries from SNP entry lists */
+struct isis_item_list;
+extern void isis_area_proxy_filter_snp_entries(struct isis_area *area,
+					       struct isis_item_list *entries);
+
 /* Check if System ID belongs to an Inside Router (exists in L1 LSDB) */
 extern bool isis_sysid_in_l1_lsdb(struct isis_area *area, const uint8_t *sysid);
 
@@ -80,7 +85,7 @@ extern bool area_proxy_drop_rx_real_l2_on_boundary(
 	struct isis_circuit *circuit, const uint8_t *lsp_id);
 
 /* For show commands */
-extern void isis_area_proxy_show(struct vty *vty, const struct isis_area *area);
+extern void isis_area_proxy_show(struct vty *vty, struct isis_area *area);
 extern void isis_area_proxy_show_election(struct vty *vty, struct isis_area *area);
 extern void isis_area_proxy_show_ready(struct vty *vty, struct isis_area *area);
 extern void isis_area_proxy_show_lsp(struct vty *vty, struct isis_area *area);
