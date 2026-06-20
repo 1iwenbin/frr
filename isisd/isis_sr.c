@@ -89,13 +89,22 @@ struct isis_sr_block *isis_sr_find_srgb(struct lspdb_head *lspdb,
 	struct isis_lsp *lsp;
 
 	lsp = isis_root_system_lsp(lspdb, sysid);
-	if (!lsp)
+	if (!lsp) {
+		zlog_debug("SR-DBG: find_srgb(%pLS) LSP NOT FOUND", sysid);
 		return NULL;
+	}
 
 	/* Primary: Router Capability SRGB (RFC 9666 Step 4). */
 	if (lsp->tlvs->router_cap
-	    && lsp->tlvs->router_cap->srgb.range_size > 0)
+	    && lsp->tlvs->router_cap->srgb.range_size > 0) {
+		zlog_debug("SR-DBG: find_srgb(%pLS) → RouterCap SRGB [%u,%u) flags=0x%x",
+			   sysid,
+			   lsp->tlvs->router_cap->srgb.lower_bound,
+			   lsp->tlvs->router_cap->srgb.lower_bound
+				   + lsp->tlvs->router_cap->srgb.range_size,
+			   lsp->tlvs->router_cap->srgb.flags);
 		return &lsp->tlvs->router_cap->srgb;
+	}
 
 	/* RFC 9666 §4.3.2 Fallback: Area SID from Type 20 TLV.
 	 * For Proxy LSPs advertising an Area SID without SRGB,
@@ -108,10 +117,13 @@ struct isis_sr_block *isis_sr_find_srgb(struct lspdb_head *lspdb,
 	    && lsp->tlvs->area_proxy->has_area_sid) {
 		static struct isis_sr_block area_sid_srgb;
 
+		zlog_debug("SR-DBG: find_srgb(%pLS) → AreaSID fallback value=%u",
+			   sysid, lsp->tlvs->area_proxy->area_sid_value);
+
 		area_sid_srgb.lower_bound =
 			lsp->tlvs->area_proxy->area_sid_value;
 		area_sid_srgb.range_size = 1;
-		area_sid_srgb.flags = 0;
+		area_sid_srgb.flags = ISIS_SUBTLV_SRGB_FLAG_I | ISIS_SUBTLV_SRGB_FLAG_V;
 		return &area_sid_srgb;
 	}
 
@@ -209,8 +221,11 @@ mpls_label_t sr_prefix_out_label(struct lspdb_head *lspdb, int family,
 	 * IPv6 packets.
 	 */
 	if ((family == AF_INET && !IS_SR_IPV4(nh_srgb))
-	    || (family == AF_INET6 && !IS_SR_IPV6(nh_srgb)))
+	    || (family == AF_INET6 && !IS_SR_IPV6(nh_srgb))) {
+		zlog_debug("SR-DBG: out_label(%pLS) → INVALID (AF check fail, flags=0x%x)",
+			   nh_sysid, nh_srgb->flags);
 		return MPLS_INVALID_LABEL;
+	}
 
 	if (psid->value >= nh_srgb->range_size) {
 		flog_warn(EC_ISIS_SID_OVERFLOW,

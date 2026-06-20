@@ -2365,13 +2365,14 @@ void isis_area_proxy_filter_snp_entries(struct isis_area *area,
 			else
 				entries->head = next;
 
-			/* Adjust tail pointer (points to ->next of
-			 * the last element, or to &head if empty). */
-			if ((struct isis_item *)entries->tail == item)
+			/* Adjust tail pointer if removing the last element.
+			 * tail is struct isis_item **, pointing to the last
+			 * node's ->next field (or &entries->head if empty). */
+			if (&item->next == entries->tail)
 				entries->tail = prev ? &prev->next
 						     : &entries->head;
 
-			XFREE(MTYPE_TMP, e);
+			XFREE(MTYPE_ISIS_TLV, e);
 			entries->count--;
 		} else {
 			prev = item;

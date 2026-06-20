@@ -177,6 +177,11 @@ static int isis_zebra_add_nexthops(struct isis *isis, struct list *nexthops,
 	for (ALL_LIST_ELEMENTS_RO(nexthops, node, nexthop)) {
 		struct zapi_nexthop *api_nh;
 
+		zlog_debug("SR-DBG:   nh[%d] family=%d ip=%pI6 sr.present=%d label_stack=%p mpls_lsp=%d type=%d",
+			   count, nexthop->family, &nexthop->ip.ipv6,
+			   nexthop->sr.present, (void *)nexthop->label_stack,
+			   mpls_lsp, type);
+
 		if (count >= MULTIPATH_NUM)
 			break;
 		api_nh = &zapi_nexthops[count];
@@ -222,10 +227,7 @@ static int isis_zebra_add_nexthops(struct isis *isis, struct list *nexthops,
 		} else if (mpls_lsp) {
 			switch (type) {
 			case ISIS_NEXTHOP_MAIN:
-				/*
-				 * Do not use non-SR enabled nexthops to prevent
-				 * broken LSPs from being formed.
-				 */
+				zlog_debug("SR-DBG:   SKIP: MAIN nh without sr/label_stack");
 				continue;
 			case ISIS_NEXTHOP_BACKUP:
 				/*
@@ -348,6 +350,10 @@ void isis_zebra_prefix_sid_install(struct isis_area *area,
 
 	sr_debug("ISIS-Sr (%s): update label %u for prefix %pFX",
 		 area->area_tag, psid->label, prefix);
+
+	zlog_debug("SR-DBG: prefix_sid_install %pFX label=%u nh_count=%u sr.present=%d",
+		   prefix, psid->label, listcount(rinfo->nexthops),
+		   psid->present);
 
 	/* Prepare message. */
 	memset(&zl, 0, sizeof(zl));

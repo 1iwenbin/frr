@@ -1268,6 +1268,14 @@ lspfragloop:
 
 			/* Parse list of Prefix-SID subTLVs */
 			has_valid_psid = false;
+			zlog_debug("SR-DBG: spf_ipv6 %pFX depth=%d subtlvs=%p psids=%p %s",
+				   &ip_info.dest, depth,
+				   (void *)r->subtlvs,
+				   r->subtlvs
+					   ? (void *)r->subtlvs->prefix_sids
+						     .head
+					   : NULL,
+				   rawlspid_print(lsp->hdr.lsp_id));
 			if (r->subtlvs) {
 				for (struct isis_item *i =
 					     r->subtlvs->prefix_sids.head;

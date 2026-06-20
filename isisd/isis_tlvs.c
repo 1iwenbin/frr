@@ -46,7 +46,7 @@
 #include "isisd/isis_te.h"
 #include "isisd/isis_sr.h"
 
-DEFINE_MTYPE_STATIC(ISISD, ISIS_TLV, "ISIS TLVs");
+DEFINE_MTYPE(ISISD, ISIS_TLV, "ISIS TLVs");
 DEFINE_MTYPE(ISISD, ISIS_SUBTLV, "ISIS Sub-TLVs");
 DEFINE_MTYPE_STATIC(ISISD, ISIS_MT_ITEM_LIST, "ISIS MT Item Lists");
 
@@ -3264,6 +3264,10 @@ static int pack_item_ipv6_reach(struct isis_item *i, struct stream *s,
 	control |= r->external ? ISIS_IPV6_REACH_EXTERNAL : 0;
 	control |= r->subtlvs ? ISIS_IPV6_REACH_SUBTLV : 0;
 
+	zlog_debug("SR-DBG: PACK ipv6 %pFX subtlvs=%p flag=%s",
+		   &r->prefix, (void *)r->subtlvs,
+		   r->subtlvs ? "SET" : "NOT SET");
+
 	stream_putc(s, control);
 	stream_putc(s, r->prefix.prefixlen);
 
@@ -3364,6 +3368,9 @@ static int unpack_item_ipv6_reach(uint16_t mtid, uint8_t len, struct stream *s,
 			isis_free_subtlvs(rv->subtlvs);
 			rv->subtlvs = NULL;
 		}
+	} else {
+		zlog_debug("SR-DBG: TLV decode: %pFX IPv6 reach SUBTLV flag NOT SET",
+			   &rv->prefix);
 	}
 
 	append_item(items, (struct isis_item *)rv);
@@ -4447,13 +4454,8 @@ static void delete_item(struct isis_item_list *dest, struct isis_item *del)
 		prev->next = del->next;
 	if (dest->head == del)
 		dest->head = del->next;
-	if ((struct isis_item *)dest->tail == del) {
-		*dest->tail = prev;
-		if (prev)
-			dest->tail = &(*dest->tail)->next;
-		else
-			dest->tail = &dest->head;
-	}
+	if (&del->next == dest->tail)
+		dest->tail = prev ? &prev->next : &dest->head;
 	dest->count--;
 }
 
@@ -6027,7 +6029,7 @@ void isis_tlvs_add_ipv6_reach(struct isis_tlvs *tlvs, uint16_t mtid,
 			XCALLOC(MTYPE_ISIS_SUBTLV, sizeof(*psid));
 
 		isis_sr_prefix_cfg2subtlv(pcfg, external, psid);
-		r->subtlvs = isis_alloc_subtlvs(ISIS_CONTEXT_SUBTLV_IP_REACH);
+		r->subtlvs = isis_alloc_subtlvs(ISIS_CONTEXT_SUBTLV_IPV6_REACH);
 		append_item(&r->subtlvs->prefix_sids, (struct isis_item *)psid);
 	}
 

@@ -962,6 +962,10 @@ static void lsp_build_ext_reach_ipv6(struct isis_lsp *lsp,
 {
 	struct route_table *er_table =
 		get_ext_reach(area, AF_INET6, lsp->level);
+
+	zlog_debug("SR-DBG: lsp_build_ext_reach_ipv6 level=%d table=%p",
+		   lsp->level, (void *)er_table);
+
 	if (!er_table)
 		return;
 
@@ -984,6 +988,9 @@ static void lsp_build_ext_reach_ipv6(struct isis_lsp *lsp,
 
 			if (area->srdb.enabled)
 				pcfg = isis_sr_cfg_prefix_find(area, p);
+
+			zlog_debug("SR-DBG: lsp_build_ipv6 %pFX pcfg=%p",
+				   p, (void *)pcfg);
 
 			isis_tlvs_add_ipv6_reach(lsp->tlvs,
 						 isis_area_ipv6_topology(area),
@@ -1116,10 +1123,12 @@ static void lsp_build(struct isis_lsp *lsp, struct isis_area *area)
 	if (area->isis->router_id != 0 || area->area_proxy_enabled) {
 		struct isis_router_cap cap = {};
 
-		if (area->isis->router_id != 0) {
+		if (area->isis->router_id != 0)
 			cap.router_id.s_addr = area->isis->router_id;
 
-		/* Add SR Sub-TLVs if SR is enabled. */
+		/* Add SR Sub-TLVs if SR is enabled.
+		 * Must be OUTSIDE the router_id != 0 check — IPv6-only
+		 * deployments may have router_id=0 but still need SRGB. */
 		if (area->srdb.enabled) {
 			struct isis_sr_db *srdb = &area->srdb;
 			uint32_t range_size;
@@ -1146,7 +1155,6 @@ static void lsp_build(struct isis_lsp *lsp, struct isis_area *area)
 			/* Disable SR Algorithm */
 			cap.algo[0] = SR_ALGORITHM_UNSET;
 			cap.algo[1] = SR_ALGORITHM_UNSET;
-			}
 		}
 
 		/* RFC 9667: Area Leader priority.
