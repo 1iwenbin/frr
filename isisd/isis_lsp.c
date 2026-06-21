@@ -1431,6 +1431,9 @@ int lsp_generate(struct isis_area *area, int level)
 	if ((area == NULL) || (area->is_type & level) != level)
 		return ISIS_ERROR;
 
+	zlog_warn("Area Proxy: lsp_generate called (level=%d enabled=%d sysid=%pSY)",
+		  level, area->area_proxy_enabled, area->area_proxy_sysid);
+
 	memset(&lspid, 0, ISIS_SYS_ID_LEN + 2);
 
 	memcpy(&lspid, area->isis->sysid, ISIS_SYS_ID_LEN);
@@ -1455,6 +1458,39 @@ int lsp_generate(struct isis_area *area, int level)
 	/* build_lsp_data (newlsp, area); */
 	lsp_build(newlsp, area);
 	/* time to calculate our checksum */
+
+	/* RFC 9666: Type 20 Area Proxy TLV (§4.3.1).
+	 * - Only in L2 LSP fragment 0.
+	 * - Never in Proxy LSPs.
+	 * - Every Area-Proxy-enabled node includes an empty Type 20
+	 *   container (no sub-TLVs) to signal participation.
+	 * - All voting nodes (priority > 0) with a configured
+	 *   proxy-sysid include the Proxy System ID sub-TLV
+	 *   (type 1).  This is needed so GS can discover the
+	 *   Area identity from ANY neighbor, not just the Leader. */
+	if (level == IS_LEVEL_2 &&
+	    LSP_FRAGMENT(newlsp->hdr.lsp_id) == 0 &&
+	    area->area_proxy_enabled &&
+	    !isis_lsp_is_proxy_lsp(newlsp)) {
+		struct isis_area_proxy_tlv ap = {};
+		/* Include Proxy System ID sub-TLV if this node is a
+		 * voting member of an Area Proxy (priority > 0) and
+		 * has a configured proxy-sysid.  All voting nodes in
+		 * the same Area carry the same proxy-sysid, so GS can
+		 * discover the Area from any L1 neighbor. */
+		if (!isis_area_proxy_sysid_is_zero(area->area_proxy_sysid) &&
+		    area->area_proxy_leader_priority > 0) {
+			ap.has_proxy_sysid = true;
+			memcpy(ap.proxy_sysid, area->area_proxy_sysid,
+			       ISIS_SYS_ID_LEN);
+			zlog_warn("Area Proxy: Type 20 TLV added (sysid=%pSY)",
+				  area->area_proxy_sysid);
+		} else {
+			zlog_warn("Area Proxy: Type 20 TLV empty (no sysid)");
+		}
+		isis_tlvs_set_area_proxy(newlsp->tlvs, &ap);
+	}
+
 	lsp_seqno_update(newlsp);
 	newlsp->last_generated = time(NULL);
 	lsp_flood(newlsp, NULL);
@@ -1518,6 +1554,27 @@ static int lsp_regenerate(struct isis_area *area, int level)
 
 	lsp_clear_data(lsp);
 	lsp_build(lsp, area);
+
+	/* RFC 9666: Type 20 Area Proxy TLV (§4.3.1) — regenerate path.
+	 * Same rules as lsp_generate() above. */
+	if (level == IS_LEVEL_2 &&
+	    LSP_FRAGMENT(lsp->hdr.lsp_id) == 0 &&
+	    area->area_proxy_enabled &&
+	    !isis_lsp_is_proxy_lsp(lsp)) {
+		struct isis_area_proxy_tlv ap = {};
+		if (!isis_area_proxy_sysid_is_zero(area->area_proxy_sysid) &&
+		    area->area_proxy_leader_priority > 0) {
+			ap.has_proxy_sysid = true;
+			memcpy(ap.proxy_sysid, area->area_proxy_sysid,
+			       ISIS_SYS_ID_LEN);
+			zlog_warn("Area Proxy: Type 20 TLV added via regenerate (sysid=%pSY)",
+				  area->area_proxy_sysid);
+		} else {
+			zlog_warn("Area Proxy: Type 20 TLV empty via regenerate");
+		}
+		isis_tlvs_set_area_proxy(lsp->tlvs, &ap);
+	}
+
 	rem_lifetime = lsp_rem_lifetime(area, level);
 	lsp->hdr.rem_lifetime = rem_lifetime;
 	lsp->last_generated = time(NULL);

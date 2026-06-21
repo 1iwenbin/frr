@@ -22,6 +22,26 @@ extern int isis_area_proxy_set_sysid(struct isis_area *area,
 extern int isis_area_proxy_set_sid(struct isis_area *area, uint32_t sid);
 extern int isis_area_proxy_unset_sid(struct isis_area *area);
 
+/* Check if proxy-sysid is all-zero (not configured) */
+extern bool isis_area_proxy_sysid_is_zero(const uint8_t *sysid);
+
+/* Purge all Proxy LSP fragments from LSDB (step-down / admin disable) */
+extern void isis_area_proxy_lsp_purge(struct isis_area *area);
+
+/* GS Handover: discover proxy-sysid from neighbor's Type 20 TLV */
+extern int isis_area_proxy_discover_sysid_from_neighbor(
+	struct isis_area *area, const uint8_t *neighbor_sysid,
+	uint8_t *sysid_out);
+
+/* GS Handover: migrate a GS to a new Area (disable → update → enable) */
+extern void isis_area_proxy_migrate_area(
+	struct isis_area *area, const uint8_t *new_proxy_sysid);
+
+/* GS Handover: unified migration decision (all entry points).
+ * Enforces A/B oscillation guard, UNKNOWN defer, deferred execution.
+ * Called from adjacency UP, 3s retry, and reconcile. */
+extern void isis_area_proxy_consider_migration(struct isis_area *area);
+
 /* Aggregation and LSP generation */
 extern struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area);
 extern int isis_area_proxy_lsp_generate(struct isis_area *area);

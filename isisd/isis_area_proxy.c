@@ -34,11 +34,23 @@ struct area_proxy_election_result {
 /* ── Forward declarations ── */
 static bool am_i_leader(struct isis_area *area);
 static bool isis_area_proxy_ready(struct isis_area *area);
-static void isis_area_proxy_lsp_purge(struct isis_area *area);
+void isis_area_proxy_lsp_purge(struct isis_area *area);
 static void isis_area_proxy_reconcile_cb(struct thread *t);
 static bool area_proxy_lsp_fragment_valid(struct isis_lsp *lsp);
 static struct area_proxy_election_result
 area_proxy_election_compute(struct isis_area *area);
+
+/*
+ * Check if a proxy-sysid buffer is all-zero (not configured).
+ * Used by set_sysid, no proxy-sysid CLI, and lsp_generate.
+ */
+bool isis_area_proxy_sysid_is_zero(const uint8_t *sysid)
+{
+	for (int i = 0; i < ISIS_SYS_ID_LEN; i++)
+		if (sysid[i] != 0)
+			return false;
+	return true;
+}
 
 void isis_area_proxy_enable(struct isis_area *area)
 {
@@ -115,36 +127,48 @@ void isis_area_proxy_enable(struct isis_area *area)
 	/* Schedule initial reconcile — with startup settle window.
 	 * Reconciler defers all work until settle expires + jitter. */
 	isis_area_proxy_schedule_reconcile(area, AP_REASON_INITIAL);
+
+	/* L2 LSP regeneration (for Type 20 TLV) is deferred to
+	 * set_sysid() — called after proxy-sysid is configured. */
 }
 
 void isis_area_proxy_disable(struct isis_area *area)
 {
-	if (!area || !area->area_proxy_enabled)
+	if (!area)
+		return;
+
+	/* Re-entrancy: if already disabled, true no-op.
+	 * migrate_area() may call disable() twice in rapid
+	 * succession (disable → memcpy → enable → disable again). */
+	if (!area->area_proxy_enabled)
 		return;
 
 	area->area_proxy_enabled = false;
+
+	/* Purge Proxy LSP BEFORE clearing sysid.
+	 * isis_area_proxy_lsp_purge() reads area->area_proxy_sysid
+	 * to locate the LSPs — sysid must still be the old value.
+	 * The purge function itself checks own_lsp, so it is safe
+	 * for GS (never originated Proxy LSPs) and non-GS alike. */
+	isis_area_proxy_lsp_purge(area);
+
 	memset(area->area_proxy_sysid, 0, ISIS_SYS_ID_LEN);
 	area->area_proxy_sid = 0;
 	area->proxy_lsp_dirty = false;
 	area->ap_pending_reasons = 0;
-	/* Cancel any pending reconcile */
+
+	/* Cancel pending timers.  Free deferred ctx to avoid leak. */
 	THREAD_OFF(area->t_area_proxy_reconcile);
+	THREAD_OFF(area->t_migrate_deferred);
+	XFREE(MTYPE_TMP, area->migrate_deferred_ctx_ptr);
+	area->migrate_deferred_ctx_ptr = NULL;
+	area->pending_migration = false;
 
 	zlog_info("Area Proxy: disabled on area %s", area->area_tag);
 
-	/* Purge Proxy LSP if we are the leader.
-	 * Use lsp_search() instead of direct proxy_lsp[] access
-	 * to guard against dangling pointer (P6 hardening). */
-	{
-		uint8_t purge_id[ISIS_SYS_ID_LEN + 2] = {};
-		memcpy(purge_id, area->area_proxy_sysid, ISIS_SYS_ID_LEN);
-		if (lsp_search(&area->lspdb[ISIS_LEVEL2 - 1], purge_id)) {
-			isis_area_proxy_lsp_purge(area);
-			lsp_regenerate_schedule(area, ISIS_LEVEL2, 0);
-		}
-	}
-
-	/* Regenerate L2 LSP to remove Area Proxy TLV */
+	/* Regenerate L2 LSP to remove Type 20 Area Proxy TLV.
+	 * Use lsp_regenerate_schedule() — the standard FRR path
+	 * that handles sequence-number / fragment / flooding. */
 	lsp_regenerate_schedule(area, ISIS_LEVEL2, 0);
 }
 
@@ -207,6 +231,8 @@ void isis_area_proxy_show(struct vty *vty, struct isis_area *area)
 			}
 			vty_out(vty, "  Role: %s\n", i_am ? "LEADER" : "FOLLOWER");
 			vty_out(vty, "  Priority: %u\n", area->area_proxy_leader_priority);
+			vty_out(vty, "  GS Auto-Discovery: %s\n",
+				area->non_voting_auto_discovery ? "enabled" : "disabled");
 			vty_out(vty, "  Election check interval: %us\n",
 				area->area_proxy_elect_check_sec ? area->area_proxy_elect_check_sec : 30);
 			if (has_proxy)
@@ -505,11 +531,7 @@ void isis_area_proxy_show_misconfig(struct vty *vty, struct isis_area *area)
 	vty_out(vty, "Area Proxy Misconfiguration Check\n");
 
 	/* Check proxy-sysid is set */
-	bool sysid_zero = true;
-	for (int i = 0; i < ISIS_SYS_ID_LEN; i++) {
-		if (area->area_proxy_sysid[i] != 0) { sysid_zero = false; break; }
-	}
-	if (sysid_zero) {
+	if (isis_area_proxy_sysid_is_zero(area->area_proxy_sysid)) {
 		vty_out(vty, "  ⚠  proxy-sysid not configured\n");
 		issues++;
 	}
@@ -592,14 +614,138 @@ int isis_area_proxy_set_sysid(struct isis_area *area, const char *sysid_str)
 		return -1;
 	}
 
+	/* Detect whether this is a real change from a non-zero old value.
+	 * First-time config (old sysid all-zero) does not trigger purge. */
+	bool old_nonzero = !isis_area_proxy_sysid_is_zero(area->area_proxy_sysid);
+	bool changed = old_nonzero &&
+		(memcmp(area->area_proxy_sysid, sysid, ISIS_SYS_ID_LEN) != 0);
+
+	/* Purge old Proxy LSP before updating sysid.
+	 * lsp_purge() reads area->area_proxy_sysid (still old value). */
+	if (changed)
+		isis_area_proxy_lsp_purge(area);
+
 	memcpy(area->area_proxy_sysid, sysid, ISIS_SYS_ID_LEN);
 
 	zlog_info("Area Proxy: set proxy-sysid to %pSY on area %s",
 		  area->area_proxy_sysid, area->area_tag);
 
-	/* Don't schedule generation — mode may not be set yet.
-	 * Generation triggered by leader-election / no leader-election. */
+	/* Trigger reconcile on real change so the new Proxy LSP
+	 * (or leader election with new sysid) is generated. */
+	if (changed) {
+		area->proxy_lsp_dirty = true;
+		isis_area_proxy_schedule_reconcile(area, AP_REASON_CONFIG_CHANGE);
+	}
+
+	/* Always regenerate own L2 LSP — Type 20 TLV must reflect
+	 * the proxy-sysid regardless of whether it's first config
+	 * (changed=false) or a cross-area migration (changed=true). */
+	if (area->is_type & IS_LEVEL_2)
+		lsp_generate(area, IS_LEVEL_2);
+
 	return 0;
+}
+
+/*
+ * GS Handover: discover the proxy-sysid of an Area from a neighbor's
+ * L2 LSP (Type 20 Area Proxy TLV — sub-TLV 1: Proxy System ID).
+ *
+ * Called on inter-area handover to determine whether GS has moved
+ * into a new Area.  Returns 0 on success, -1 if the neighbor's L2 LSP
+ * does not carry an Area Proxy TLV.
+ */
+/*
+ * GS Handover: discover the proxy-sysid from the neighbor's L2 LSP.
+ *
+ * RFC 9666 §4.4: every Area Proxy router publishes its proxy-sysid
+ * in its own L2 LSP (Router Capability sub-TLV 28 / oaemu Type 20 TLV).
+ * GS-01 reads the neighbor's L2 LSP to discover the Area identity.
+ */
+int isis_area_proxy_discover_sysid_from_neighbor(
+	struct isis_area *area,
+	const uint8_t *neighbor_sysid,
+	uint8_t *sysid_out)
+{
+	uint8_t l2_id[ISIS_SYS_ID_LEN + 2] = {};
+
+	memcpy(l2_id, neighbor_sysid, ISIS_SYS_ID_LEN);
+	/* fragment 0, pseudo-node 0 from {} initializer */
+
+	struct isis_lsp *lsp = lsp_search(
+		&area->lspdb[ISIS_LEVEL2 - 1], l2_id);
+	if (!lsp) {
+		zlog_warn("Area Proxy: discover — neighbor L2 LSP not in LSDB "
+			  "(neighbor=%pSY)", neighbor_sysid);
+		return -1;
+	}
+	if (!lsp->tlvs) {
+		zlog_warn("Area Proxy: discover — neighbor L2 LSP has no TLVs "
+			  "(neighbor=%pSY)", neighbor_sysid);
+		return -1;
+	}
+	if (!lsp->tlvs->area_proxy) {
+		zlog_warn("Area Proxy: discover — neighbor L2 LSP has no "
+			  "Type 20 TLV (neighbor=%pSY, missing proxy-sysid?)",
+			  neighbor_sysid);
+		return -1;
+	}
+	if (!lsp->tlvs->area_proxy->has_proxy_sysid) {
+		zlog_warn("Area Proxy: discover — neighbor Type 20 TLV "
+			  "has no proxy-sysid (neighbor=%pSY)",
+			  neighbor_sysid);
+		return -1;
+	}
+
+	memcpy(sysid_out, lsp->tlvs->area_proxy->proxy_sysid,
+	       ISIS_SYS_ID_LEN);
+	return 0;
+}
+
+/*
+ * GS Handover: migrate a Ground Station to a new Proxy Area.
+ *
+ * Called only on inter-area handover (discovered proxy-sysid differs
+ * from current).  Uses a disable → update sysid → enable cycle to
+ * ensure clean state reset of all Area Proxy internal structures.
+ *
+ * GS is a non-voting Follower (priority=0) — it never generated
+ * Proxy LSPs, so the old Area cleanup is handled by the old Leader
+ * (GS disconnects → ADJ_DOWN → Leader reaggregates → prefix removed).
+ */
+void isis_area_proxy_migrate_area(struct isis_area *area,
+				     const uint8_t *new_proxy_sysid)
+{
+	if (!area || !area->area_proxy_enabled)
+		return;
+
+	if (!new_proxy_sysid) {
+		zlog_warn("Area Proxy: migrate_area called with NULL sysid");
+		return;
+	}
+
+	if (isis_area_proxy_sysid_is_zero(new_proxy_sysid)) {
+		zlog_warn("Area Proxy: refuse to migrate GS to zero sysid "
+			  "(current=%pSY)", area->area_proxy_sysid);
+		return;
+	}
+
+	/* Re-entry guard: if another migration already completed to this
+	 * target (or we were preempted), skip.  Rapid double-migrate
+	 * during flapping would otherwise overwrite state. */
+	if (!isis_area_proxy_sysid_is_zero(area->area_proxy_sysid) &&
+	    memcmp(area->area_proxy_sysid, new_proxy_sysid,
+		   ISIS_SYS_ID_LEN) == 0) {
+		zlog_info("Area Proxy: GS already at target sysid %pSY, skipping",
+			  new_proxy_sysid);
+		return;
+	}
+
+	zlog_info("Area Proxy: non-voting node migrating from %pSY to %pSY",
+		  area->area_proxy_sysid, new_proxy_sysid);
+
+	isis_area_proxy_disable(area);
+	memcpy(area->area_proxy_sysid, new_proxy_sysid, ISIS_SYS_ID_LEN);
+	isis_area_proxy_enable(area);
 }
 
 int isis_area_proxy_set_sid(struct isis_area *area, uint32_t sid)
@@ -1191,7 +1337,7 @@ static bool am_i_leader(struct isis_area *area)
  * (e.g. 2→1) and the old fragment was unlinked from lspu.frags
  * but not removed from LSDB.
  */
-static void isis_area_proxy_lsp_purge(struct isis_area *area)
+void isis_area_proxy_lsp_purge(struct isis_area *area)
 {
 	uint8_t lsp_id[ISIS_SYS_ID_LEN + 2] = {};
 	int fid;
@@ -1207,6 +1353,11 @@ static void isis_area_proxy_lsp_purge(struct isis_area *area)
 			break;  /* sequential IDs — stop at first gap */
 		/* Skip already-purged placeholders (PduLen==27, rem_lifetime==0);
 		 * they will age out naturally. */
+		/* Only purge own_lsp — never touch Proxy LSPs learned
+		 * from other nodes (e.g. Area Leader's Proxy LSP in
+		 * GS LSDB). */
+		if (!lsp->own_lsp)
+			continue;
 		if (lsp->hdr.rem_lifetime == 0)
 			continue;
 
@@ -1344,6 +1495,130 @@ static void proxy_sysid_set_rebuild(struct isis_area *area)
  *   5. Generates Proxy LSP transactionally (all-or-nothing)
  *   6. Reschedules itself periodically
  * ──────────────────────────────────────────── */
+
+/* ── GS handover: unified migration decision ──
+ * All migration entry points (adjacency UP, retry, reconcile)
+ * must go through this function.  It enforces:
+ *
+ *  1. A/B oscillation guard — migrate ONLY if current Area has
+ *     no remaining UP L1 neighbor (current_area_alive check).
+ *  2. UNKNOWN guard — if any UP neighbor's Area identity is
+ *     temporarily unreadable (L2 sync not yet complete), defer
+ *     migration until the next reconcile.
+ *  3. Deferred execution — migration is scheduled via allocated
+ *     context + 0-delay event, never synchronous.
+ *  4. Dedup — at most one deferred event at a time (t_migrate_deferred).
+ *
+ * Called from:
+ *  - isis_adj_state_change()  (adjacency UP)
+ *  - handover_discover_retry_cb()  (3s delayed retry)
+ *  - isis_area_proxy_reconcile_cb()  (periodic topology scan) */
+struct migrate_deferred_ctx {
+	struct isis_area *area;
+	uint8_t target_sysid[ISIS_SYS_ID_LEN];
+};
+
+static void migrate_deferred_cb(struct thread *t);
+
+void isis_area_proxy_consider_migration(struct isis_area *area)
+{
+	struct isis_circuit *circuit;
+	struct listnode *cnode;
+	bool current_area_alive = false;
+	bool any_unknown = false;
+	uint8_t candidate_sysid[ISIS_SYS_ID_LEN] = {};
+
+	if (!area->area_proxy_leader_election ||
+	    !area->non_voting_auto_discovery ||
+	    area->area_proxy_leader_priority != 0 ||
+	    area->t_migrate_deferred != NULL)
+		return;
+
+	for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
+		struct isis_adjacency *adj = NULL;
+		if (circuit->circ_type == CIRCUIT_T_P2P &&
+		    circuit->u.p2p.neighbor &&
+		    circuit->u.p2p.neighbor->adj_state == ISIS_ADJ_UP)
+			adj = circuit->u.p2p.neighbor;
+		if (!adj || !(adj->level & IS_LEVEL_1))
+			continue;
+
+		uint8_t discovered[ISIS_SYS_ID_LEN];
+		int ret = isis_area_proxy_discover_sysid_from_neighbor(
+			area, adj->sysid, discovered);
+
+		if (ret < 0) {
+			/* LSDB not yet synced → UNKNOWN */
+			any_unknown = true;
+			continue;
+		}
+
+		if (memcmp(discovered, area->area_proxy_sysid,
+			   ISIS_SYS_ID_LEN) == 0) {
+			current_area_alive = true;
+			break;  /* current Area still alive → stay */
+		}
+
+		/* Record the first candidate new Area */
+		if (isis_area_proxy_sysid_is_zero(candidate_sysid))
+			memcpy(candidate_sysid, discovered,
+			       ISIS_SYS_ID_LEN);
+	}
+
+	/* If any neighbor is UNKNOWN, defer — L2 sync may not be
+	 * complete.  The next reconcile will re-scan. */
+	if (any_unknown)
+		return;
+
+	/* Only migrate if current Area has no UP neighbors AND a
+	 * candidate new Area was found. */
+	if (current_area_alive ||
+	    isis_area_proxy_sysid_is_zero(candidate_sysid))
+		return;
+
+	struct migrate_deferred_ctx *ctx =
+		XCALLOC(MTYPE_TMP, sizeof(*ctx));
+	ctx->area = area;
+	memcpy(ctx->target_sysid, candidate_sysid, ISIS_SYS_ID_LEN);
+	area->pending_migration = true;
+	area->migrate_deferred_ctx_ptr = ctx;
+	thread_add_event(master, migrate_deferred_cb,
+			 ctx, 0, &area->t_migrate_deferred);
+}
+
+static void migrate_deferred_cb(struct thread *t)
+{
+	struct migrate_deferred_ctx *ctx = THREAD_ARG(t);
+	struct isis_area *area = ctx->area;
+
+	/* Detach ctx from area BEFORE any code path that may call
+	 * disable() (which does XFREE(area->migrate_deferred_ctx_ptr)).
+	 * This prevents use-after-free in migrate → disable, and
+	 * double-free when callback later does XFREE(ctx). */
+	area->t_migrate_deferred = NULL;
+	if (area->migrate_deferred_ctx_ptr == ctx)
+		area->migrate_deferred_ctx_ptr = NULL;
+
+	/* Re-validate full preconditions: GS may have been disabled
+	 * or auto-discovery turned off after the event was queued. */
+	if (!area->area_proxy_enabled ||
+	    !area->area_proxy_leader_election ||
+	    !area->non_voting_auto_discovery ||
+	    area->area_proxy_leader_priority != 0 ||
+	    !area->pending_migration) {
+		area->pending_migration = false;
+		XFREE(MTYPE_TMP, ctx);
+		return;
+	}
+
+	area->pending_migration = false;
+
+	/* Re-check: another migration may have already completed
+	 * (migrate_area has its own re-entry guard). */
+	isis_area_proxy_migrate_area(area, ctx->target_sysid);
+
+	XFREE(MTYPE_TMP, ctx);
+}
 
 static void isis_area_proxy_reconcile_cb(struct thread *t)
 {
@@ -1563,6 +1838,12 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 	}
 
 	area->ap_reconcile_running = false;
+
+	/* ── 6.5: GS handover discovery on topology change ──
+	 * Delegate to isis_area_proxy_consider_migration() — the unified entry
+	 * point that enforces A/B oscillation guard, UNKNOWN defer,
+	 * deferred execution, and dedup. */
+	isis_area_proxy_consider_migration(area);
 
 	/* ── 7. If new reasons arrived during execution, reschedule fast ── */
 	if (area->ap_pending_reasons) {
@@ -1833,14 +2114,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		area->lsp_mtu = DEFAULT_LSP_MTU;
 
 	/* Check if proxy_sysid is configured */
-	bool sysid_zero = true;
-	for (int i = 0; i < ISIS_SYS_ID_LEN; i++) {
-		if (area->area_proxy_sysid[i] != 0) {
-			sysid_zero = false;
-			break;
-		}
-	}
-	if (sysid_zero) {
+	if (isis_area_proxy_sysid_is_zero(area->area_proxy_sysid)) {
 		zlog_warn("Area Proxy: cannot generate Proxy LSP, "
 			  "proxy-sysid is not configured");
 		area->ap_reconcile_running = false;
