@@ -846,6 +846,7 @@ static int process_lsp(uint8_t pdu_type, struct isis_circuit *circuit,
 {
 	int level;
 	bool circuit_scoped;
+	struct isis_tlvs *tlvs = NULL;	/* BUG-010: must init before any goto out */
 	size_t pdu_start = stream_get_getp(circuit->rcv_stream);
 	size_t pdu_end = stream_get_endp(circuit->rcv_stream);
 	char raw_pdu[pdu_end - pdu_start];
@@ -972,7 +973,6 @@ static int process_lsp(uint8_t pdu_type, struct isis_circuit *circuit,
 		return ISIS_WARNING;
 	}
 
-	struct isis_tlvs *tlvs = NULL;
 	int retval = ISIS_WARNING;
 	const char *error_log;
 
@@ -1054,6 +1054,7 @@ static int process_lsp(uint8_t pdu_type, struct isis_circuit *circuit,
 	 */
 	struct isis_lsp *lsp =
 		lsp_search(&circuit->area->lspdb[level - 1], hdr.lsp_id);
+
 	int comp = 0;
 	if (lsp)
 		comp = lsp_compare(circuit->area->area_tag, lsp, hdr.seqno,
@@ -1467,7 +1468,7 @@ static int process_snp(uint8_t pdu_type, struct isis_circuit *circuit,
 		}
 	}
 
-	struct isis_tlvs *tlvs;
+	struct isis_tlvs *tlvs = NULL;
 	int retval = ISIS_WARNING;
 	const char *error_log;
 

@@ -895,6 +895,12 @@ static int proxy_aggregate_ip_reach_cb(const struct prefix *prefix,
 	}
 
 	/* Collect Prefix-SID (consensus strategy). */
+	zlog_debug("Area Proxy: agg prefix %pFX subtlvs=%p psids_head=%p has_sid=%d metric=%u",
+		   prefix, (void *)subtlvs,
+		   (subtlvs && subtlvs->prefix_sids.head)
+			   ? (void *)subtlvs->prefix_sids.head
+			   : NULL,
+		   e->has_sid, metric);
 	if (subtlvs && subtlvs->prefix_sids.head) {
 		struct isis_prefix_sid *psid =
 			(struct isis_prefix_sid *)subtlvs->prefix_sids.head;
@@ -943,6 +949,9 @@ static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
 	if (e->has_sid && !e->sid_conflict) {
 		sid_cfg.sid = e->sid_value;
 		sid_cfg.n_flag_clear = false;
+
+		zlog_debug("Area Proxy: write prefix %pFX with SID=%u flags=0x%02x",
+			   &e->prefix, e->sid_value, e->sid_flags);
 
 		/*
 		 * RFC 9666 §4.4.7: R-flag (Readvertised) SHOULD

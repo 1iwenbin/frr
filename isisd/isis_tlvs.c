@@ -50,6 +50,71 @@ DEFINE_MTYPE(ISISD, ISIS_TLV, "ISIS TLVs");
 DEFINE_MTYPE(ISISD, ISIS_SUBTLV, "ISIS Sub-TLVs");
 DEFINE_MTYPE_STATIC(ISISD, ISIS_MT_ITEM_LIST, "ISIS MT Item Lists");
 
+/*
+ * Live TLVs tracking set — catches use-after-free without
+ * dereferencing the (potentially unmapped) tlvs pointer.
+ *
+ * Uses a fixed-capacity open-addressing hash table indexed by the
+ * lower bits of the pointer value.  No dynamic allocation after
+ * init → safe to call from free paths.
+ */
+#define TLVS_LIVE_BITS  16
+#define TLVS_LIVE_SIZE  (1U << TLVS_LIVE_BITS)
+#define TLVS_LIVE_MASK  (TLVS_LIVE_SIZE - 1)
+
+static uintptr_t tlvs_live_set[TLVS_LIVE_SIZE];
+
+static void tlvs_live_add(uintptr_t p)
+{
+	uint32_t i = (uint32_t)(p >> 4) & TLVS_LIVE_MASK;
+	uint32_t probe = 0;
+
+	while (probe < TLVS_LIVE_SIZE) {
+		if (!tlvs_live_set[i]) {
+			tlvs_live_set[i] = p;
+			return;
+		}
+		if (tlvs_live_set[i] == p)
+			return; /* already present */
+		i = (i + 1) & TLVS_LIVE_MASK;
+		probe++;
+	}
+}
+
+static int tlvs_live_remove(uintptr_t p)
+{
+	uint32_t i = (uint32_t)(p >> 4) & TLVS_LIVE_MASK;
+	uint32_t probe = 0;
+
+	while (probe < TLVS_LIVE_SIZE) {
+		if (tlvs_live_set[i] == p) {
+			tlvs_live_set[i] = 0;
+			return 1; /* found and removed */
+		}
+		if (!tlvs_live_set[i])
+			return 0; /* not found */
+		i = (i + 1) & TLVS_LIVE_MASK;
+		probe++;
+	}
+	return 0;
+}
+
+static int tlvs_live_contains(uintptr_t p)
+{
+	uint32_t i = (uint32_t)(p >> 4) & TLVS_LIVE_MASK;
+	uint32_t probe = 0;
+
+	while (probe < TLVS_LIVE_SIZE) {
+		if (tlvs_live_set[i] == p)
+			return 1;
+		if (!tlvs_live_set[i])
+			return 0;
+		i = (i + 1) & TLVS_LIVE_MASK;
+		probe++;
+	}
+	return 0;
+}
+
 typedef int (*unpack_tlv_func)(enum isis_tlv_context context, uint8_t tlv_type,
 			       uint8_t tlv_len, struct stream *s,
 			       struct sbuf *log, void *dest, int indent);
@@ -3470,6 +3535,16 @@ static int unpack_tlv_area_proxy(enum isis_tlv_context context,
 		sub_len = stream_getc(s);
 		consumed += 2;
 
+		/* sub_len=0 is invalid: sub-TLVs must carry at least
+		 * 1 byte of data.  Without this guard the loop will
+		 * never advance consumed and spin forever. */
+		if (sub_len == 0) {
+			sbuf_push(log, indent,
+				  "WARNING: Area Proxy sub-TLV %hhu has zero length, aborting parse\n",
+				  sub_type);
+			goto done;
+		}
+
 		if (consumed + sub_len > tlv_len) {
 			sbuf_push(log, indent,
 				  "WARNING: Area Proxy sub-TLV length overflow\n");
@@ -4651,6 +4726,7 @@ struct isis_tlvs *isis_alloc_tlvs(void)
 
 	result = XCALLOC(MTYPE_ISIS_TLV, sizeof(*result));
 
+	tlvs_live_add((uintptr_t)result);
 	init_item_list(&result->isis_auth);
 	init_item_list(&result->area_addresses);
 	init_item_list(&result->mt_router_info);
@@ -4747,6 +4823,8 @@ struct isis_tlvs *isis_copy_tlvs(struct isis_tlvs *tlvs)
 	rv->router_cap = copy_tlv_router_cap(tlvs->router_cap);
 
 	rv->spine_leaf = copy_tlv_spine_leaf(tlvs->spine_leaf);
+
+	rv->area_proxy = copy_tlv_area_proxy(tlvs->area_proxy);
 
 	return rv;
 }
@@ -4851,6 +4929,15 @@ void isis_free_tlvs(struct isis_tlvs *tlvs)
 {
 	if (!tlvs)
 		return;
+
+#ifdef ISIS_MEMORY_DEBUG
+	if (!tlvs_live_contains((uintptr_t)tlvs)) {
+		zlog_warn("BUG: tlvs %p not in live set — already freed (caller=%s)",
+			  (void *)tlvs, __func__);
+		assert(!"isis_free_tlvs: use-after-free detected");
+	}
+	tlvs_live_remove((uintptr_t)tlvs);
+#endif
 
 	free_items(ISIS_CONTEXT_LSP, ISIS_TLV_AUTH, &tlvs->isis_auth);
 	free_tlv_purge_originator(tlvs->purge_originator);
