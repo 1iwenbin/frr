@@ -26,6 +26,10 @@
 #include "isisd/isis_adjacency.h"
 #include "isisd/isis_spf.h"
 
+DEFINE_MTYPE_STATIC(ISISD, ISIS_AREA_PROXY_PREFIX_AGG, "ISIS Area Proxy Prefix Agg");
+DEFINE_MTYPE_STATIC(ISISD, ISIS_AREA_PROXY_SYSID_SET, "ISIS Area Proxy SysID Set");
+DEFINE_MTYPE_STATIC(ISISD, ISIS_AREA_PROXY_MIGRATE_CTX, "ISIS Area Proxy Migrate Ctx");
+
 /* 8.4 compatibility macros for deprecated 10.7 list APIs */
 #define iso_address_list_first(al) ((al) && listhead(*(al)))
 
@@ -165,7 +169,7 @@ void isis_area_proxy_disable(struct isis_area *area)
 	/* Cancel pending timers.  Free deferred ctx to avoid leak. */
 	THREAD_OFF(area->t_area_proxy_reconcile);
 	THREAD_OFF(area->t_migrate_deferred);
-	XFREE(MTYPE_TMP, area->migrate_deferred_ctx_ptr);
+	XFREE(MTYPE_ISIS_AREA_PROXY_MIGRATE_CTX, area->migrate_deferred_ctx_ptr);
 	area->migrate_deferred_ctx_ptr = NULL;
 	area->pending_migration = false;
 
@@ -809,13 +813,16 @@ bool isis_sysid_in_l1_lsdb(struct isis_area *area, const uint8_t *sysid)
 }
 
 /*
- * hash_clean callback: XFREE a pointer allocated with MTYPE_TMP.
- * Used with hash_clean() to properly track FRR memory statistics
- * instead of raw free() which bypasses MTYPE counters.
+ * hash_clean callbacks: XFREE with correct MTYPE for FRR memory tracking.
  */
-static void hash_clean_xfree_mtype_tmp(void *ptr)
+static void hash_clean_xfree_prefix_agg(void *ptr)
 {
-	XFREE(MTYPE_TMP, ptr);
+	XFREE(MTYPE_ISIS_AREA_PROXY_PREFIX_AGG, ptr);
+}
+
+static void hash_clean_xfree_proxy_sysid(void *ptr)
+{
+	XFREE(MTYPE_ISIS_AREA_PROXY_SYSID_SET, ptr);
 }
 
 /*
@@ -878,7 +885,7 @@ static void *prefix_agg_hash_alloc(void *arg)
 	struct prefix_agg_key *key = arg;
 	struct prefix_agg_entry *e;
 
-	e = XCALLOC(MTYPE_TMP, sizeof(*e));
+	e = XCALLOC(MTYPE_ISIS_AREA_PROXY_PREFIX_AGG, sizeof(*e));
 	prefix_copy(&e->prefix, &key->prefix);
 	e->min_metric = UINT32_MAX;
 	e->has_min = false;
@@ -1206,7 +1213,7 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 		zlog_info("Area Proxy: aggregation summary — %u prefixes: %u with SID, %u without SID, %u conflict",
 			  ctx.cnt.total_prefixes, ctx.cnt.with_sid,
 			  ctx.cnt.without_sid, ctx.cnt.sid_conflict);
-		hash_clean(pat, hash_clean_xfree_mtype_tmp);
+		hash_clean(pat, hash_clean_xfree_prefix_agg);
 		hash_free(pat);
 	}
 
@@ -1524,7 +1531,7 @@ static void *proxy_sysid_hash_alloc(void *arg)
 	struct proxy_sysid_key *src = arg;
 	struct proxy_sysid_key *dst;
 
-	dst = XCALLOC(MTYPE_TMP, sizeof(*dst));
+	dst = XCALLOC(MTYPE_ISIS_AREA_PROXY_SYSID_SET, sizeof(*dst));
 	memcpy(dst->sysid, src->sysid, ISIS_SYS_ID_LEN);
 	return dst;
 }
@@ -1538,7 +1545,7 @@ static void proxy_sysid_set_rebuild(struct isis_area *area)
 	if (!area->proxy_sysid_set)
 		return;
 
-	hash_clean(area->proxy_sysid_set, hash_clean_xfree_mtype_tmp);
+	hash_clean(area->proxy_sysid_set, hash_clean_xfree_proxy_sysid);
 
 	struct isis_lsp *lsp;
 	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp;
@@ -1652,7 +1659,7 @@ void isis_area_proxy_consider_migration(struct isis_area *area)
 		return;
 
 	struct migrate_deferred_ctx *ctx =
-		XCALLOC(MTYPE_TMP, sizeof(*ctx));
+		XCALLOC(MTYPE_ISIS_AREA_PROXY_MIGRATE_CTX, sizeof(*ctx));
 	ctx->area = area;
 	memcpy(ctx->target_sysid, candidate_sysid, ISIS_SYS_ID_LEN);
 	area->pending_migration = true;
@@ -1682,7 +1689,7 @@ static void migrate_deferred_cb(struct thread *t)
 	    area->area_proxy_leader_priority != 0 ||
 	    !area->pending_migration) {
 		area->pending_migration = false;
-		XFREE(MTYPE_TMP, ctx);
+		XFREE(MTYPE_ISIS_AREA_PROXY_MIGRATE_CTX, ctx);
 		return;
 	}
 
@@ -1692,8 +1699,7 @@ static void migrate_deferred_cb(struct thread *t)
 	 * (migrate_area has its own re-entry guard). */
 	isis_area_proxy_migrate_area(area, ctx->target_sysid);
 
-	XFREE(MTYPE_TMP, ctx);
-}
+	XFREE(MTYPE_ISIS_AREA_PROXY_MIGRATE_CTX, ctx);}
 
 static void isis_area_proxy_reconcile_cb(struct thread *t)
 {
