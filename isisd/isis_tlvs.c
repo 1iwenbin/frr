@@ -57,7 +57,10 @@ DEFINE_MTYPE_STATIC(ISISD, ISIS_MT_ITEM_LIST, "ISIS MT Item Lists");
  * Uses a fixed-capacity open-addressing hash table indexed by the
  * lower bits of the pointer value.  No dynamic allocation after
  * init → safe to call from free paths.
+ *
+ * Enabled only with ISIS_MEMORY_DEBUG for fail-fast in debug builds.
  */
+#ifdef ISIS_MEMORY_DEBUG
 #define TLVS_LIVE_BITS  16
 #define TLVS_LIVE_SIZE  (1U << TLVS_LIVE_BITS)
 #define TLVS_LIVE_MASK  (TLVS_LIVE_SIZE - 1)
@@ -114,6 +117,8 @@ static int tlvs_live_contains(uintptr_t p)
 	}
 	return 0;
 }
+
+#endif /* ISIS_MEMORY_DEBUG */
 
 typedef int (*unpack_tlv_func)(enum isis_tlv_context context, uint8_t tlv_type,
 			       uint8_t tlv_len, struct stream *s,
@@ -4726,7 +4731,9 @@ struct isis_tlvs *isis_alloc_tlvs(void)
 
 	result = XCALLOC(MTYPE_ISIS_TLV, sizeof(*result));
 
+#ifdef ISIS_MEMORY_DEBUG
 	tlvs_live_add((uintptr_t)result);
+#endif
 	init_item_list(&result->isis_auth);
 	init_item_list(&result->area_addresses);
 	init_item_list(&result->mt_router_info);

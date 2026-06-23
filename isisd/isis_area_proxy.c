@@ -5,6 +5,11 @@
  * IS-IS Area Proxy (RFC 9666) — configuration management
  */
 
+/* oaemu: strict compiler checks — catch BUG-010 class errors at build time */
+#pragma GCC diagnostic error "-Wjump-misses-init"
+#pragma GCC diagnostic error "-Wuninitialized"
+#pragma GCC diagnostic error "-Wreturn-type"
+
 #include <zebra.h>
 
 #include "vty.h"
