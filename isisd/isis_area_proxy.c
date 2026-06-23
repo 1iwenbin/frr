@@ -804,6 +804,18 @@ bool isis_sysid_in_l1_lsdb(struct isis_area *area, const uint8_t *sysid)
 }
 
 /*
+ * BUG-011 note: do NOT filter L1+L2 nodes from prefix aggregation.
+ * An earlier attempt (isis_area_proxy_lsp_l1l2_origin) excluded nodes
+ * whose SysID had a non-Proxy L2 LSP, but in topologies where all
+ * satellites are L1+L2 (e.g. Walker Delta MPLS SR), this removes ALL
+ * IPv6 prefixes from the Proxy LSP — breaking cross-area routing.
+ *
+ * The correct fix is to ensure the aggregation correctly captures
+ * Prefix-SID sub-TLVs (which the code already does) rather than
+ * removing the duplicate L2 sources at the aggregation level.
+ */
+
+/*
  * Prefix aggregation entry: deduplicate by prefix, keep minimum metric
  * and Prefix-SID (consensus strategy: keep only if all occurrences agree).
  * Uses FRR hash table for O(1) lookup and unlimited capacity.
@@ -934,10 +946,25 @@ static int proxy_aggregate_ip_reach_cb(const struct prefix *prefix,
  * detected, the prefix is written without Prefix-SID to avoid
  * publishing an incorrect label mapping.
  */
+struct proxy_agg_counters {
+	uint32_t total_prefixes;
+	uint32_t with_sid;
+	uint32_t without_sid;
+	uint32_t sid_conflict;
+};
+
+struct proxy_agg_write_ctx {
+	struct isis_tlvs *proxy_tlvs;
+	struct proxy_agg_counters cnt;
+};
+
 static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
 {
 	struct prefix_agg_entry *e = hb->data;
-	struct isis_tlvs *proxy_tlvs = arg;
+	struct proxy_agg_write_ctx *ctx = arg;
+	struct isis_tlvs *proxy_tlvs = ctx->proxy_tlvs;
+
+	ctx->cnt.total_prefixes++;
 
 	if (!e->has_min)
 		return;
@@ -993,6 +1020,11 @@ static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
 				SR_LAST_HOP_BEHAVIOR_PHP;
 
 		pcfg = &sid_cfg;
+		ctx->cnt.with_sid++;
+	} else if (e->sid_conflict) {
+		ctx->cnt.sid_conflict++;
+	} else {
+		ctx->cnt.without_sid++;
 	}
 
 	if (e->prefix.family == AF_INET) {
@@ -1154,7 +1186,11 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 		}
 
 		/* Write collected prefixes to Proxy LSP */
-		hash_iterate(pat, prefix_agg_write_cb, proxy_tlvs);
+		struct proxy_agg_write_ctx ctx = { .proxy_tlvs = proxy_tlvs };
+		hash_iterate(pat, prefix_agg_write_cb, &ctx);
+		zlog_info("Area Proxy: aggregation summary — %u prefixes: %u with SID, %u without SID, %u conflict",
+			  ctx.cnt.total_prefixes, ctx.cnt.with_sid,
+			  ctx.cnt.without_sid, ctx.cnt.sid_conflict);
 		hash_clean(pat, free);
 		hash_free(pat);
 	}
@@ -1415,13 +1451,28 @@ static bool isis_area_proxy_ready(struct isis_area *area)
 		if (!is_own && !isis_spf_sysid_reachable(area, lsp->hdr.lsp_id))
 			continue;  /* not L1-SPF-reachable — skip */
 
-		/* Check Area Proxy TLV (Type 27) in L2 LSP */
-		bool has_tlv;
-		if (is_own)
+		/* Check Area Proxy TLV (Type 27) in L2 LSP.
+		 * A node with area_leader_priority > 0 is a voting member
+		 * and MUST have the TLV.  A node with priority == 0 is a
+		 * non-voting / non-participating node (e.g. Ground Station)
+		 * — skip it, but do NOT block the ready check. */
+		bool has_tlv = false;
+		if (is_own) {
+			if (area->area_proxy_leader_priority == 0)
+				continue;  /* self is non-voting */
 			has_tlv = (area->area_proxy_leader_priority > 0);
-		else
-			has_tlv = (lsp->tlvs && lsp->tlvs->router_cap &&
-				   lsp->tlvs->router_cap->area_leader_priority > 0);
+		} else {
+			/* TLV truly missing: router_cap absent or no
+			 * area_leader_priority field at all. */
+			if (!lsp->tlvs || !lsp->tlvs->router_cap) {
+				zlog_info("Area Proxy: not ready — %pLS missing Router Capability TLV (L1-SPF-reachable)",
+					  lsp->hdr.lsp_id);
+				return false;
+			}
+			if (lsp->tlvs->router_cap->area_leader_priority == 0)
+				continue;  /* non-voting, e.g. GS */
+			has_tlv = true;
+		}
 
 		if (!has_tlv) {
 			zlog_info("Area Proxy: not ready — %pLS missing Type 27 TLV (L1-SPF-reachable)",
@@ -1430,7 +1481,7 @@ static bool isis_area_proxy_ready(struct isis_area *area)
 		}
 	}
 
-	zlog_info("Area Proxy: ready check passed (all L1-SPF routers have Type 27)");
+	zlog_info("Area Proxy: ready check passed (all voting L1-SPF routers have Area Proxy capability; non-voting routers skipped)");
 	return true;
 }
 
@@ -2358,6 +2409,39 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	}
 
 	list_delete(&fragments);
+
+	/* ── BUG-011 diagnostic: count IPv6 reach with/without sub-TLVs ── */
+	{
+		uint32_t ipv6_total = 0, ipv6_with_sub = 0;
+		struct isis_lsp *flsp;
+		struct listnode *ln;
+		struct isis_ipv6_reach *r;
+
+		for (ALL_LIST_ELEMENTS_RO(lsp0->lspu.frags, ln, flsp)) {
+			if (!flsp->tlvs)
+				continue;
+			for (r = (struct isis_ipv6_reach *)
+				 flsp->tlvs->ipv6_reach.head;
+			     r; r = r->next) {
+				ipv6_total++;
+				if (r->subtlvs)
+					ipv6_with_sub++;
+			}
+		}
+		/* Also count fragment 0 */
+		if (lsp0->tlvs) {
+			for (r = (struct isis_ipv6_reach *)
+				 lsp0->tlvs->ipv6_reach.head;
+			     r; r = r->next) {
+				ipv6_total++;
+				if (r->subtlvs)
+					ipv6_with_sub++;
+			}
+		}
+		zlog_info("Area Proxy: Proxy LSP TLVs audit — %u IPv6 reach, %u with sub-TLVs, %u without",
+			  ipv6_total, ipv6_with_sub,
+			  ipv6_total - ipv6_with_sub);
+	}
 
 	zlog_info("Area Proxy: generated Proxy LSP %pLS, %d fragments",
 		  lsp_id, frag_count);
