@@ -2162,14 +2162,17 @@ static bool area_proxy_lsp_content_unchanged(struct isis_area *area,
  */
 int isis_area_proxy_lsp_generate(struct isis_area *area)
 {
-	struct isis_lsp *lsp0;
-	struct isis_tlvs *tlvs;
+	struct isis_lsp *lsp0 = NULL;
+	struct isis_tlvs *tlvs = NULL;
 	uint8_t lsp_id[ISIS_SYS_ID_LEN + 2] = {};
-	struct list *fragments;
+	struct list *fragments = NULL;
 	struct listnode *node;
 	struct isis_tlvs *frag_tlvs;
 	uint32_t new_seqno = 1;
 	int frag_count = 0;
+	int ret = -1;
+	size_t tlv_space;
+	bool frag0_reused;
 
 	if (!area || !area->area_proxy_enabled)
 		return -1;
@@ -2192,29 +2195,25 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	if (isis_area_proxy_sysid_is_zero(area->area_proxy_sysid)) {
 		zlog_warn("Area Proxy: cannot generate Proxy LSP, "
 			  "proxy-sysid is not configured");
-		area->ap_reconcile_running = false;
-		return -1;
+		goto out;
 	}
 
 	/* Aggregate L1 LSDB into Proxy TLVs */
 	tlvs = isis_area_proxy_aggregate_tlvs(area);
 	if (!tlvs) {
 		zlog_warn("Area Proxy: aggregation returned NULL TLVs");
-		area->ap_reconcile_running = false;
-		return -1;
+		goto out;
 	}
 
 	/* --- Calculate available TLV space and fragment ---
 	 * Must happen before seqno bump to allow content comparison. */
-	{
-		size_t tlv_space = area->lsp_mtu - 23 - 4;
-		fragments = isis_fragment_tlvs(tlvs, tlv_space);
-	}
+	tlv_space = area->lsp_mtu - 23 - 4;
+	fragments = isis_fragment_tlvs(tlvs, tlv_space);
 	isis_free_tlvs(tlvs);
+	tlvs = NULL;
 	if (!fragments) {
 		zlog_warn("Area Proxy: isis_fragment_tlvs returned NULL");
-		area->ap_reconcile_running = false;
-		return -1;
+		goto out;
 	}
 
 	/* --- Content-change guard ---
@@ -2240,12 +2239,11 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		    lsp0->hdr.rem_lifetime >=
 		    area->lsp_refresh[ISIS_LEVEL2 - 1]) {
 			zlog_debug("Area Proxy: content unchanged, skip regenerate");
-			area_proxy_fragment_list_free(fragments);
 			area->proxy_lsp_dirty = false;
 			area->ap_lsp_skip_nochange++;
 			area->ap_lsp_last_skip_time = monotime(NULL);
-			area->ap_reconcile_running = false;
-			return 0;
+			ret = 0;
+			goto out;
 		}
 		zlog_debug("Area Proxy: content unchanged but lifetime low (%us), regenerating for refresh",
 			   lsp0->hdr.rem_lifetime);
@@ -2317,9 +2315,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 				       IS_LEVEL_1_AND_2,
 				       0, NULL, ISIS_LEVEL2);
 			if (!lsp0) {
-				area_proxy_fragment_list_free(fragments);
-				area->ap_reconcile_running = false;
-				return -1;
+				goto out;
 			}
 			lsp0->own_lsp = 0;
 		}
@@ -2335,9 +2331,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	}
 	if (!lsp0) {
 		zlog_err("Area Proxy: fragment 0 unavailable, abort generate");
-		area_proxy_fragment_list_free(fragments);
-		area->ap_reconcile_running = false;
-		return -1;
+		goto out;
 	}
 
 	/* --- Assign fragmented TLVs to LSPs, link via lspu.frags ---
@@ -2346,8 +2340,8 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	 * verified present in LSDB (not externally purged).
 	 * Fragment 1+: searched in LSDB by LSP ID; reused in-place if found.
 	 * Any reused fragment skips lsp_insert() to avoid lsp_destroy + UAF. */
-	bool frag0_reused = (area->proxy_lsp[ISIS_LEVEL2 - 1] == lsp0 &&
-			     lsp0->tlvs == NULL);
+	frag0_reused = (area->proxy_lsp[ISIS_LEVEL2 - 1] == lsp0 &&
+			lsp0->tlvs == NULL);
 	for (ALL_LIST_ELEMENTS_RO(fragments, node, frag_tlvs)) {
 		struct isis_lsp *frag;
 		bool frag_exists;
@@ -2424,6 +2418,7 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 	}
 
 	list_delete(&fragments);
+	fragments = NULL;  /* items now owned by LSPs, prevent out: double-free */
 
 	/* ── BUG-011 diagnostic: count IPv6 reach with/without sub-TLVs ── */
 	{
@@ -2485,9 +2480,12 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		  lsp0->hdr.lsp_id, lsp0->hdr.seqno,
 		  lsp0->hdr.rem_lifetime, lsp0->age_out);
 
-	area->ap_reconcile_running = false;
+	ret = 0;
 
-	return 0;
+out:
+	area_proxy_fragment_list_free(fragments);
+	area->ap_reconcile_running = false;
+	return ret;
 }
 
 /* ── isis_lsp_is_proxy_lsp ──
