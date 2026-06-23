@@ -809,6 +809,16 @@ bool isis_sysid_in_l1_lsdb(struct isis_area *area, const uint8_t *sysid)
 }
 
 /*
+ * hash_clean callback: XFREE a pointer allocated with MTYPE_TMP.
+ * Used with hash_clean() to properly track FRR memory statistics
+ * instead of raw free() which bypasses MTYPE counters.
+ */
+static void hash_clean_xfree_mtype_tmp(void *ptr)
+{
+	XFREE(MTYPE_TMP, ptr);
+}
+
+/*
  * BUG-011 note: do NOT filter L1+L2 nodes from prefix aggregation.
  * An earlier attempt (isis_area_proxy_lsp_l1l2_origin) excluded nodes
  * whose SysID had a non-Proxy L2 LSP, but in topologies where all
@@ -1196,7 +1206,7 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 		zlog_info("Area Proxy: aggregation summary — %u prefixes: %u with SID, %u without SID, %u conflict",
 			  ctx.cnt.total_prefixes, ctx.cnt.with_sid,
 			  ctx.cnt.without_sid, ctx.cnt.sid_conflict);
-		hash_clean(pat, free);
+		hash_clean(pat, hash_clean_xfree_mtype_tmp);
 		hash_free(pat);
 	}
 
@@ -1528,7 +1538,7 @@ static void proxy_sysid_set_rebuild(struct isis_area *area)
 	if (!area->proxy_sysid_set)
 		return;
 
-	hash_clean(area->proxy_sysid_set, free);
+	hash_clean(area->proxy_sysid_set, hash_clean_xfree_mtype_tmp);
 
 	struct isis_lsp *lsp;
 	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp;
