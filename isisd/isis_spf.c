@@ -762,8 +762,19 @@ static void isis_spf_add_local(struct isis_spftree *spftree,
 	vertex = isis_find_vertex(&spftree->tents, id, vtype);
 
 	if (vertex) {
-		/* C.2.5   c) */
-		if (vertex->d_N == cost) {
+		int cmp;
+
+		/*
+		 * MODE_LAYERED (RFC 9717): use (d_inter, d_intra)
+		 * tuple comparison so that paths with higher total
+		 * cost but fewer area crossings can replace existing
+		 * TENT entries — consistent with process_N().
+		 */
+		cmp = area_proxy_metric_cmp(spftree,
+					    vertex->d_N, vertex->d_inter,
+					    cost, d_inter);
+
+		if (cmp == 0) {
 			if (sadj) {
 				bool last_hop = (vertex->depth == 2);
 
@@ -780,11 +791,11 @@ static void isis_spf_add_local(struct isis_spftree *spftree,
 				       == NULL))
 				listnode_add(vertex->parents, parent);
 			return;
-		} else if (vertex->d_N < cost) {
-			/*       e) do nothing */
+		} else if (cmp < 0) {
+			/* Existing path is better — keep it. */
 			return;
-		} else { /* vertex->d_N > cost */
-			/*         f) */
+		} else {
+			/* New path is better — replace existing. */
 			isis_vertex_queue_delete(&spftree->tents, vertex);
 			hash_release(spftree->prefix_sids, vertex);
 			isis_vertex_del(vertex);
