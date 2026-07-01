@@ -1089,6 +1089,23 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 			    lsp->hdr.rem_lifetime == 0)
 				continue;
 
+			/*
+			 * Skip non-voting nodes (priority=0 GS):
+			 * their loopback prefixes should only be
+			 * reachable via L1 intra-area routing, not
+			 * via Proxy LSP (L2).  Advertising them in
+			 * both creates L1/L2 ECMP, and the L2 path
+			 * may loop on ring topologies.
+			 *
+			 * Regular satellites have priority > 0
+			 * (encoded in Router Capability TLV).
+			 * Non-voting GS have priority = 0 (not
+			 * encoded, zero-initialised after decode).
+			 */
+			if (lsp->tlvs && lsp->tlvs->router_cap &&
+			    lsp->tlvs->router_cap->area_leader_priority == 0)
+				continue;
+
 			isis_lsp_iterate_ip_reach(
 				lsp, AF_INET, ISIS_MT_IPV4_UNICAST,
 				proxy_aggregate_ip_reach_cb, pat);
