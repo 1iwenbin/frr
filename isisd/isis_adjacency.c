@@ -54,44 +54,6 @@
 DEFINE_MTYPE_STATIC(ISISD, ISIS_ADJACENCY, "ISIS adjacency");
 DEFINE_MTYPE(ISISD, ISIS_ADJACENCY_INFO, "ISIS adjacency info");
 
-/*
- * GS Handover: delayed retry for cross-area detection.
- *
- * When a GS (priority=0 Follower) establishes L1 adjacency with a
- * new satellite, the neighbor's L2 LSP with Type 20 Area Proxy TLV
- * may not yet be in our L2 LSDB.  We schedule a 3-second retry to
- * give L2 sync a chance before logging a warning.
- *
- * expected_sysid snapshots area->area_proxy_sysid at schedule time.
- * If the GS has already migrated (sysid changed) or Area Proxy was
- * disabled before the retry fires, the callback skips silently.
- */
-struct handover_retry_ctx {
-	struct isis_area *area;
-	uint8_t neighbor_sysid[ISIS_SYS_ID_LEN];
-	uint8_t expected_sysid[ISIS_SYS_ID_LEN];
-};
-
-static void handover_discover_retry_cb(struct thread *t)
-{
-	struct handover_retry_ctx *ctx = THREAD_ARG(t);
-
-	/* Guard: if GS already migrated (sysid changed) or Area Proxy was
-	 * disabled, skip silently — the retry is no longer relevant. */
-	if (!ctx->area->area_proxy_enabled
-	    || memcmp(ctx->area->area_proxy_sysid, ctx->expected_sysid,
-		      ISIS_SYS_ID_LEN) != 0) {
-		XFREE(MTYPE_TMP, ctx);
-		return;
-	}
-
-	/* Delegate to unified migration decision — enforces A/B
-	 * oscillation guard, UNKNOWN defer, and deferred execution. */
-	isis_area_proxy_consider_migration(ctx->area);
-
-	XFREE(MTYPE_TMP, ctx);
-}
-
 static struct isis_adjacency *adj_alloc(struct isis_circuit *circuit,
 					const uint8_t *id)
 {
@@ -440,35 +402,6 @@ void isis_adj_state_change(struct isis_adjacency **padj,
 		circuit->area->proxy_lsp_dirty = true;
 		isis_area_proxy_schedule_reconcile(circuit->area,
 						   AP_REASON_ADJ_CHANGE);
-
-		/* GS Handover: detect inter-area move on adjacency UP.
-		 * Delegate to isis_area_proxy_consider_migration() — the unified
-		 * entry point that enforces A/B oscillation guard and
-		 * deferred execution.
-		 *
-		 * On first attempt, the neighbor's L2 LSP may not yet
-		 * be in our LSDB (L2 sync latency).  Schedule a 3s
-		 * retry to re-trigger isis_area_proxy_consider_migration(). */
-		if (new_state == ISIS_ADJ_UP
-		    && circuit->area->area_proxy_leader_election
-		    && circuit->area->non_voting_auto_discovery
-		    && circuit->area->area_proxy_leader_priority == 0) {
-			isis_area_proxy_consider_migration(circuit->area);
-
-			/* L2 sync may not be complete yet — schedule a
-			 * 3s retry as a safety net. */
-			struct handover_retry_ctx *ctx =
-				XCALLOC(MTYPE_TMP, sizeof(*ctx));
-			ctx->area = circuit->area;
-			memcpy(ctx->neighbor_sysid, adj->sysid,
-			       ISIS_SYS_ID_LEN);
-			memcpy(ctx->expected_sysid,
-			       circuit->area->area_proxy_sysid,
-			       ISIS_SYS_ID_LEN);
-			thread_add_timer(master,
-				handover_discover_retry_cb,
-				ctx, 3, NULL);
-		}
 	}
 
 	if (del) {

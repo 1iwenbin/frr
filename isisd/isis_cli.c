@@ -3427,40 +3427,6 @@ DEFUN(no_area_proxy_settle,
 	return CMD_SUCCESS;
 }
 
-DEFUN(area_proxy_non_voting_auto_discovery,
-      area_proxy_non_voting_auto_discovery_cmd,
-      "area-proxy non-voting-auto-discovery",
-      "IS-IS Area Proxy\n"
-      "Enable non-voting Follower automatic Area discovery and handover\n")
-{
-	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
-
-	if (!area)
-		return CMD_WARNING;
-	if (!area->area_proxy_enabled) {
-		vty_out(vty,
-			"%% Area Proxy is not enabled. Enable with 'area-proxy' first.\n");
-		return CMD_WARNING;
-	}
-	area->non_voting_auto_discovery = true;
-	return CMD_SUCCESS;
-}
-
-DEFUN(no_area_proxy_non_voting_auto_discovery,
-      no_area_proxy_non_voting_auto_discovery_cmd,
-      "no area-proxy non-voting-auto-discovery",
-      NO_STR
-      "IS-IS Area Proxy\n"
-      "Disable non-voting Follower automatic Area discovery and handover\n")
-{
-	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
-
-	if (!area)
-		return CMD_WARNING;
-	area->non_voting_auto_discovery = false;
-	return CMD_SUCCESS;
-}
-
 static const struct cmd_element satellite_schedule_load_cmd;
 static const struct cmd_element satellite_schedule_clear_cmd;
 
@@ -3615,8 +3581,6 @@ void isis_cli_init(void)
 	install_element(ISIS_NODE, &no_area_proxy_elect_check_interval_cmd);
 	install_element(ISIS_NODE, &area_proxy_settle_cmd);
 	install_element(ISIS_NODE, &no_area_proxy_settle_cmd);
-	install_element(ISIS_NODE, &area_proxy_non_voting_auto_discovery_cmd);
-	install_element(ISIS_NODE, &no_area_proxy_non_voting_auto_discovery_cmd);
 	/* RFC 9666 Area Proxy: Interface-level boundary marking */
 	install_element(INTERFACE_NODE, &isis_area_proxy_boundary_cmd);
 	install_element(INTERFACE_NODE, &no_isis_area_proxy_boundary_cmd);

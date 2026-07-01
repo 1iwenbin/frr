@@ -258,14 +258,6 @@ struct isis_area {
 
 	/* ── RFC 9666 Area Proxy ── */
 	bool area_proxy_enabled;
-	bool non_voting_auto_discovery;   /* non-voting Follower auto Area discovery */
-
-	/* GS handover: deferred migration from reconcile tail
-	 * (avoids synchronous disable/enable reentrancy inside
-	 *  the reconciler callback). */
-	struct thread *t_migrate_deferred;
-	bool pending_migration;
-	struct migrate_deferred_ctx *migrate_deferred_ctx_ptr;  /* for THREAD_OFF cleanup */
 	uint8_t area_proxy_sysid[ISIS_SYS_ID_LEN];
 
 	/* Area SID (oaemu extension, published via Type 20 TLV) */
