@@ -466,12 +466,12 @@ static void isis_route_update(struct isis_area *area, struct prefix *prefix,
 	if (area == NULL)
 		return;
 
-	zlog_debug("SR-DBG: route_update %pFX active=%d synced=%d sr.present=%d sr.label=%u",
-		   prefix,
-		   CHECK_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ACTIVE) ? 1 : 0,
-		   CHECK_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ZEBRA_SYNCED) ? 1 : 0,
-		   route_info->sr.present ? 1 : 0,
-		   route_info->sr.label);
+	/* zlog_debug("SR-DBG: route_update %pFX active=%d synced=%d sr.present=%d sr.label=%u",
+	 * 	   prefix,
+	 * 	   CHECK_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ACTIVE) ? 1 : 0,
+	 * 	   CHECK_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ZEBRA_SYNCED) ? 1 : 0,
+	 * 	   route_info->sr.present ? 1 : 0,
+	 * 	   route_info->sr.label); */
 
 	if (CHECK_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ACTIVE)) {
 		if (CHECK_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ZEBRA_SYNCED))

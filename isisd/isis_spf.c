@@ -1279,14 +1279,13 @@ lspfragloop:
 
 			/* Parse list of Prefix-SID subTLVs */
 			has_valid_psid = false;
-			zlog_debug("SR-DBG: spf_ipv6 %pFX depth=%d subtlvs=%p psids=%p %s",
-				   &ip_info.dest, depth,
-				   (void *)r->subtlvs,
-				   r->subtlvs
-					   ? (void *)r->subtlvs->prefix_sids
-						     .head
-					   : NULL,
-				   rawlspid_print(lsp->hdr.lsp_id));
+			/* zlog_debug("SR-DBG: spf_ipv6 %pFX depth=%d subtlvs=%p psids=%p %s",
+			 * 	   &ip_info.dest, depth,
+			 * 	   (void *)r->subtlvs,
+			 * 	   r->subtlvs
+			 * 		   ? (void *)r->subtlvs->prefix_sids.head
+			 * 		   : NULL,
+			 * 	   rawlspid_print(lsp->hdr.lsp_id)); */
 			if (r->subtlvs) {
 				for (struct isis_item *i =
 					     r->subtlvs->prefix_sids.head;
@@ -2141,9 +2140,8 @@ static void isis_run_spf_cb(struct thread *thread)
 	isis_area_delete_backup_adj_sids(area, level);
 	isis_area_invalidate_routes(area, level);
 
-	if (IS_DEBUG_SPF_EVENTS)
-		zlog_debug("ISIS-SPF (%s) L%d SPF needed, periodic SPF",
-			   area->area_tag, level);
+	zlog_debug("ISIS-SPF (%s) L%d SPF run (scheduled)",
+		   area->area_tag, level);
 
 	if (area->ip_circuits) {
 		isis_run_spf_with_protection(
@@ -2203,11 +2201,9 @@ int _isis_spf_schedule(struct isis_area *area, int level,
 	assert(diff >= 0);
 	assert(area->is_type & level);
 
-	if (IS_DEBUG_SPF_EVENTS) {
-		zlog_debug(
-			"ISIS-SPF (%s) L%d SPF schedule called, lastrun %d sec ago Caller: %s %s:%d",
+	zlog_debug(
+			"ISIS-SPF (%s) L%d SPF schedule: lastrun=%ds ago reason=%s (from %s:%d)",
 			area->area_tag, level, diff, func, file, line);
-	}
 
 	THREAD_OFF(area->t_rlfa_rib_update);
 	if (area->spf_delay_ietf[level - 1]) {
@@ -2252,9 +2248,8 @@ int _isis_spf_schedule(struct isis_area *area, int level,
 	thread_add_timer(master, isis_run_spf_cb, isis_run_spf_arg(area, level),
 			 timer, &area->spf_timer[level - 1]);
 
-	if (IS_DEBUG_SPF_EVENTS)
-		zlog_debug("ISIS-SPF (%s) L%d SPF scheduled %ld sec from now",
-			   area->area_tag, level, timer);
+	zlog_debug("ISIS-SPF (%s) L%d SPF scheduled %ld sec from now",
+		   area->area_tag, level, timer);
 
 	return ISIS_OK;
 }

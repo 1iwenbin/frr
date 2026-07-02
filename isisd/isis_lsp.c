@@ -142,6 +142,8 @@ static void lsp_destroy(struct isis_lsp *lsp)
 		}
 	}
 
+	zlog_debug("ISIS-SPF trigger: lsp_destroy %s L%d",
+		   rawlspid_print(lsp->hdr.lsp_id), lsp->level);
 	isis_spf_schedule(lsp->area, lsp->level);
 
 	if (lsp->pdu)
@@ -345,6 +347,8 @@ void lsp_inc_seqno(struct isis_lsp *lsp, uint32_t seqno)
 	lsp->hdr.seqno = newseq;
 
 	lsp_pack_pdu(lsp);
+	zlog_debug("ISIS-SPF trigger: lsp_inc_seqno %s L%d",
+		   rawlspid_print(lsp->hdr.lsp_id), lsp->level);
 	isis_spf_schedule(lsp->area, lsp->level);
 	isis_te_lsp_event(lsp, LSP_INC);
 }
@@ -583,6 +587,8 @@ void lsp_update(struct isis_lsp *lsp, struct isis_lsp_hdr *hdr,
 	}
 
 	if (lsp->hdr.seqno) {
+		zlog_debug("ISIS-SPF trigger: lsp_update %s L%d",
+			   rawlspid_print(lsp->hdr.lsp_id), lsp->level);
 		isis_spf_schedule(lsp->area, lsp->level);
 		isis_te_lsp_event(lsp, LSP_UPD);
 	}
@@ -667,6 +673,8 @@ void lsp_insert(struct lspdb_head *head, struct isis_lsp *lsp)
 {
 	lspdb_add(head, lsp);
 	if (lsp->hdr.seqno) {
+		zlog_debug("ISIS-SPF trigger: lsp_insert %s L%d",
+			   rawlspid_print(lsp->hdr.lsp_id), lsp->level);
 		isis_spf_schedule(lsp->area, lsp->level);
 		isis_te_lsp_event(lsp, LSP_ADD);
 	}
@@ -963,8 +971,8 @@ static void lsp_build_ext_reach_ipv6(struct isis_lsp *lsp,
 	struct route_table *er_table =
 		get_ext_reach(area, AF_INET6, lsp->level);
 
-	zlog_debug("SR-DBG: lsp_build_ext_reach_ipv6 level=%d table=%p",
-		   lsp->level, (void *)er_table);
+	/* zlog_debug("SR-DBG: lsp_build_ext_reach_ipv6 level=%d table=%p",
+	 * 	   lsp->level, (void *)er_table); */
 
 	if (!er_table)
 		return;
@@ -989,8 +997,8 @@ static void lsp_build_ext_reach_ipv6(struct isis_lsp *lsp,
 			if (area->srdb.enabled)
 				pcfg = isis_sr_cfg_prefix_find(area, p);
 
-			zlog_debug("SR-DBG: lsp_build_ipv6 %pFX pcfg=%p",
-				   p, (void *)pcfg);
+/* zlog_debug("SR-DBG: lsp_build_ipv6 %pFX pcfg=%p",
+		 * 	   p, (void *)pcfg); */
 
 			isis_tlvs_add_ipv6_reach(lsp->tlvs,
 						 isis_area_ipv6_topology(area),

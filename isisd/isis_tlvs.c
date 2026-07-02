@@ -3334,9 +3334,9 @@ static int pack_item_ipv6_reach(struct isis_item *i, struct stream *s,
 	control |= r->external ? ISIS_IPV6_REACH_EXTERNAL : 0;
 	control |= r->subtlvs ? ISIS_IPV6_REACH_SUBTLV : 0;
 
-	zlog_debug("SR-DBG: PACK ipv6 %pFX subtlvs=%p flag=%s",
-		   &r->prefix, (void *)r->subtlvs,
-		   r->subtlvs ? "SET" : "NOT SET");
+	/* zlog_debug("SR-DBG: PACK ipv6 %pFX subtlvs=%p flag=%s",
+	 * 	   &r->prefix, (void *)r->subtlvs,
+	 * 	   r->subtlvs ? "SET" : "NOT SET"); */
 
 	stream_putc(s, control);
 	stream_putc(s, r->prefix.prefixlen);
@@ -3439,8 +3439,8 @@ static int unpack_item_ipv6_reach(uint16_t mtid, uint8_t len, struct stream *s,
 			rv->subtlvs = NULL;
 		}
 	} else {
-		zlog_debug("SR-DBG: TLV decode: %pFX IPv6 reach SUBTLV flag NOT SET",
-			   &rv->prefix);
+		/* zlog_debug("SR-DBG: TLV decode: %pFX IPv6 reach SUBTLV flag NOT SET",
+		 * 	   &rv->prefix); */
 	}
 
 	append_item(items, (struct isis_item *)rv);
