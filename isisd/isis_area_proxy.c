@@ -1047,25 +1047,42 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 				continue;
 
 			/*
-			 * Deduplicate: one entry per remote SysID,
-			 * keeping the minimum metric across all
-			 * Inside Edge Routers (RFC 9666 §4.2).
+			 * IS neighbor aggregation strategy:
+			 *
+			 * [impl-opt, default] Deduplicate: one entry per
+			 *   remote SysID, keeping the minimum metric across
+			 *   all Inside Edge Routers.  IIH masquerading makes
+			 *   multiple Edge Routers to the same area appear as
+			 *   the same neighbor → natural dedup.
+			 *
+			 * [baseline] RFC 9666 §4.4.5 "copy each": copy every
+			 *   IS neighbor entry verbatim, no dedup.  Used for
+			 *   control-plane cost analysis (K-value study).
+			 *   Toggle via CLI: [no] is-neighbor-baseline.
 			 */
-			struct isis_extended_reach *existing;
-			for (existing = (struct isis_extended_reach *)
-				     proxy_tlvs->extended_reach.head;
-			     existing; existing = existing->next) {
-				if (memcmp(existing->id, reach->id,
-					   sizeof(existing->id)) == 0)
-					break;
-			}
-			if (existing) {
-				if (reach->metric < existing->metric)
-					existing->metric = reach->metric;
-			} else {
+			if (area->area_proxy_rfc9666_faithful) {
+				/* Baseline: copy each (RFC 9666 §4.4.5) */
 				isis_tlvs_add_extended_reach(
 					proxy_tlvs, ISIS_MT_IPV4_UNICAST,
 					reach->id, reach->metric, NULL);
+			} else {
+				/* Impl-opt: dedup + min metric */
+				struct isis_extended_reach *existing;
+				for (existing = (struct isis_extended_reach *)
+					     proxy_tlvs->extended_reach.head;
+				     existing; existing = existing->next) {
+					if (memcmp(existing->id, reach->id,
+						   sizeof(existing->id)) == 0)
+						break;
+				}
+				if (existing) {
+					if (reach->metric < existing->metric)
+						existing->metric = reach->metric;
+				} else {
+					isis_tlvs_add_extended_reach(
+						proxy_tlvs, ISIS_MT_IPV4_UNICAST,
+						reach->id, reach->metric, NULL);
+				}
 			}
 		}
 	}

@@ -280,6 +280,7 @@ struct isis_area {
 	/* ── RFC 9667 Leader Election ── */
 	bool area_proxy_leader_election;       /* CLI: area-proxy leader-election */
 	uint8_t area_proxy_leader_priority;    /* CLI: area-proxy priority (default 128) */
+	bool area_proxy_rfc9666_faithful;      /* CLI: rfc9666-faithful (RFC §4.4.5 copy each) */
 	uint8_t area_proxy_elect_check_sec;    /* CLI: area-proxy elect-check-interval (default 30) */
 	time_t area_proxy_last_gen_time;       /* 上次生成 Proxy LSP 的时间戳 */
 	bool area_proxy_mode_set;              /* 模式是否已显式设置 */

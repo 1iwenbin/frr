@@ -3235,6 +3235,41 @@ DEFUN(no_area_proxy_sysid,
 	return CMD_SUCCESS;
 }
 
+/* ── RFC 9666 faithful mode (IS neighbor aggregation strategy) ── */
+DEFUN(area_proxy_rfc9666_faithful,
+      area_proxy_rfc9666_faithful_cmd,
+      "rfc9666-faithful",
+      "Enable RFC 9666 faithful mode: copy each IS neighbor without dedup (§4.4.5) — immutable once set\n")
+{
+	struct isis_area *area = isis_cli_area_proxy_get_area(vty);
+
+	if (!area)
+		return CMD_WARNING;
+	if (area->area_proxy_rfc9666_faithful) {
+		vty_out(vty,
+			"%% rfc9666-faithful is already enabled and cannot be disabled.\n");
+		return CMD_WARNING;
+	}
+	area->area_proxy_rfc9666_faithful = true;
+	if (area->area_proxy_enabled) {
+		area->proxy_lsp_dirty = true;
+		isis_area_proxy_schedule_reconcile(area, AP_REASON_CONFIG_CHANGE);
+	}
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_area_proxy_rfc9666_faithful,
+      no_area_proxy_rfc9666_faithful_cmd,
+      "no rfc9666-faithful",
+      NO_STR
+      "Disable RFC 9666 faithful mode — NOT ALLOWED: this is an immutable startup setting\n")
+{
+	vty_out(vty,
+		"%% rfc9666-faithful cannot be disabled once enabled.\n"
+		"%% Restart the daemon to reset.\n");
+	return CMD_WARNING;
+}
+
 DEFUN(area_proxy_sid,
       area_proxy_sid_cmd,
       "area-sid (16-1048575)",
@@ -3581,6 +3616,8 @@ void isis_cli_init(void)
 	install_element(ISIS_NODE, &no_area_proxy_elect_check_interval_cmd);
 	install_element(ISIS_NODE, &area_proxy_settle_cmd);
 	install_element(ISIS_NODE, &no_area_proxy_settle_cmd);
+	install_element(ISIS_NODE, &area_proxy_rfc9666_faithful_cmd);
+	install_element(ISIS_NODE, &no_area_proxy_rfc9666_faithful_cmd);
 	/* RFC 9666 Area Proxy: Interface-level boundary marking */
 	install_element(INTERFACE_NODE, &isis_area_proxy_boundary_cmd);
 	install_element(INTERFACE_NODE, &no_isis_area_proxy_boundary_cmd);
