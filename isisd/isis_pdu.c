@@ -1106,15 +1106,29 @@ dontcheckadj:
 
 	/* 7.3.16.2 - If this is an LSP from another IS with identical seq_num
 	 * but
-	 *            wrong checksum, initiate a purge. */
+	 *            wrong checksum, initiate a purge.
+	 *
+	 * RFC 9666 Area Proxy: Proxy LSP checksum mismatch is expected
+	 * during Leader transition — skip confusion/purge and let
+	 * lsp_compare() handle it naturally (same seqno + different
+	 * checksum + local copy alive → LSP_NEWER). */
 	if (lsp && (lsp->hdr.seqno == hdr.seqno)
 	    && (lsp->hdr.checksum != hdr.checksum)
 	    && hdr.rem_lifetime) {
-		zlog_warn("ISIS-Upd (%s): LSP %s seq 0x%08x with confused checksum received.",
-			  circuit->area->area_tag, rawlspid_print(hdr.lsp_id),
-			  hdr.seqno);
-		hdr.rem_lifetime = 0;
-		lsp_confusion = true;
+
+		if (isis_lsp_is_proxy_lsp(lsp)) {
+			zlog_debug("ISIS-Upd (%s): Proxy LSP %s seq 0x%08x checksum differs "
+				   "(Leader transition?), skipping confusion",
+				   circuit->area->area_tag,
+				   rawlspid_print(hdr.lsp_id), hdr.seqno);
+			lsp_confusion = false;
+		} else {
+			zlog_warn("ISIS-Upd (%s): LSP %s seq 0x%08x with confused checksum received.",
+				  circuit->area->area_tag,
+				  rawlspid_print(hdr.lsp_id), hdr.seqno);
+			hdr.rem_lifetime = 0;
+			lsp_confusion = true;
+		}
 	} else
 		lsp_confusion = false;
 
