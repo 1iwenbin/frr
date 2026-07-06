@@ -598,12 +598,17 @@ void lsp_update(struct isis_lsp *lsp, struct isis_lsp_hdr *hdr,
 	 * add new prefixes or boundary neighbors.  Mark Proxy LSP
 	 * dirty and schedule reconcile if not already pending.
 	 *
+	 * Filter: only react to LSPs from routers in our own Area
+	 * (L1 LSDB).  L2 LSPs from remote Areas trigger L2 SPF but
+	 * do not change our Proxy LSP's aggregated content.
+	 *
 	 * (New LSP arrivals are handled in lsp_insert().)
 	 */
 	if (lsp->area->area_proxy_enabled &&
 	    !isis_lsp_is_proxy_lsp(lsp) &&
 	    lsp->hdr.seqno != 0 &&
-	    lsp->hdr.rem_lifetime != 0) {
+	    lsp->hdr.rem_lifetime != 0 &&
+	    isis_sysid_in_l1_lsdb(lsp->area, lsp->hdr.lsp_id)) {
 		lsp->area->proxy_lsp_dirty = true;
 		isis_area_proxy_schedule_reconcile(lsp->area,
 						   AP_REASON_LSP_CHANGE);
@@ -692,7 +697,8 @@ void lsp_insert(struct lspdb_head *head, struct isis_lsp *lsp)
 	if (lsp->area->area_proxy_enabled &&
 	    !isis_lsp_is_proxy_lsp(lsp) &&
 	    lsp->hdr.seqno != 0 &&
-	    lsp->hdr.rem_lifetime != 0) {
+	    lsp->hdr.rem_lifetime != 0 &&
+	    isis_sysid_in_l1_lsdb(lsp->area, lsp->hdr.lsp_id)) {
 		lsp->area->proxy_lsp_dirty = true;
 		isis_area_proxy_schedule_reconcile(lsp->area,
 						   AP_REASON_LSP_CHANGE);

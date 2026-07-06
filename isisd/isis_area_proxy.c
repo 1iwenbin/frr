@@ -77,53 +77,21 @@ void isis_area_proxy_enable(struct isis_area *area)
 		  area->area_tag, area->area_proxy_sysid);
 
 	/*
-	 * Phase 5: Mark boundary circuits.  During startup there are no
-	 * adjacencies yet, so we rely on circuit type: L2-only circuits
-	 * on L1L2 routers are assumed to be cross-area boundaries.
-	 * The regeneration timer re-evaluates once L1 LSDB converges.
+	 * Phase 5: Mark boundary circuits.  Only L2-only circuits
+	 * (circuit-type level-2-only) are genuine cross-area boundaries.
+	 * L1L2 circuits are intra-area links — the neighbor's sysid may
+	 * temporarily be absent from L1 LSDB during initial convergence,
+	 * causing false positives that lock the circuit in boundary state
+	 * (BUG-018 §6.4).
 	 */
 	{
 		struct isis_circuit *circuit;
 		struct listnode *cnode;
 	for (ALL_LIST_ELEMENTS_RO(area->circuit_list, cnode, circuit)) {
-			/* L2-only circuits are cross-area boundaries.
-			 * We do NOT gate on area->is_type here —
-			 * during config load it may not be set yet.
-			 * The timer re-evaluates and unmarks false positives. */
 			if (circuit->is_type == IS_LEVEL_2) {
 				circuit->is_area_proxy_boundary = true;
 				zlog_info("Area Proxy: circuit %s marked as boundary (L2-only)",
 					  circuit->interface->name);
-				continue;
-			}
-			/* Also check existing L2 adjacencies for Outside neighbors */
-			if ((circuit->is_type & IS_LEVEL_2) == 0)
-				continue;
-			struct listnode *node;
-			struct isis_adjacency *adj;
-			int lvl = ISIS_LEVEL2 - 1;
-			if (circuit->circ_type == CIRCUIT_T_BROADCAST) {
-				for (ALL_LIST_ELEMENTS_RO(
-					     circuit->u.bc.adjdb[lvl],
-					     node, adj)) {
-					if (adj->adj_state == ISIS_ADJ_UP
-					    && !isis_sysid_in_l1_lsdb(
-						    area, adj->sysid)) {
-						circuit->is_area_proxy_boundary = true;
-						zlog_info("Area Proxy: circuit %s boundary (neighbor %pSY)",
-							  circuit->interface->name, adj->sysid);
-						break;
-					}
-				}
-			} else if (circuit->circ_type == CIRCUIT_T_P2P
-				   && circuit->u.p2p.neighbor
-				   && circuit->u.p2p.neighbor->adj_state == ISIS_ADJ_UP
-				   && !isis_sysid_in_l1_lsdb(
-					   area, circuit->u.p2p.neighbor->sysid)) {
-				circuit->is_area_proxy_boundary = true;
-				zlog_info("Area Proxy: circuit %s boundary (neighbor %pSY)",
-					  circuit->interface->name,
-					  circuit->u.p2p.neighbor->sysid);
 			}
 		}
 	}
@@ -870,10 +838,9 @@ struct proxy_agg_write_ctx {
 	struct proxy_agg_counters cnt;
 };
 
-static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
+static void prefix_agg_write_entry(struct prefix_agg_entry *e,
+				   struct proxy_agg_write_ctx *ctx)
 {
-	struct prefix_agg_entry *e = hb->data;
-	struct proxy_agg_write_ctx *ctx = arg;
 	struct isis_tlvs *proxy_tlvs = ctx->proxy_tlvs;
 
 	ctx->cnt.total_prefixes++;
@@ -955,6 +922,108 @@ static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
 	}
 }
 
+static void prefix_agg_write_cb(struct hash_bucket *hb, void *arg)
+{
+	prefix_agg_write_entry(hb->data, arg);
+}
+
+/*
+ * hash_iterate callback: collect entry pointers into a list for sorting.
+ */
+static void prefix_agg_collect_cb(struct hash_bucket *hb, void *arg)
+{
+	struct list *list = arg;
+	listnode_add(list, hb->data);
+}
+
+/*
+ * list_sort comparison: sort prefix_agg_entry by prefix.
+ * Ensures deterministic TLV encoding order regardless of
+ * hash table insertion order.
+ */
+static int prefix_agg_entry_list_cmp(const void **a, const void **b)
+{
+	const struct prefix_agg_entry *ea = *a;
+	const struct prefix_agg_entry *eb = *b;
+
+	return prefix_cmp((union prefixconstptr)&ea->prefix,
+			  (union prefixconstptr)&eb->prefix);
+}
+
+/* ────────────────────────────────────────────
+ * Step 2 helpers: IS neighbor sorted write
+ * ────────────────────────────────────────────
+ *
+ * Collect (sysid, metric) pairs into a list, sort by SysID,
+ * then write to proxy_tlvs.  Sorting ensures deterministic
+ * TLV encoding; the list preserves all entries including
+ * duplicates (required for rfc9666-faithful baseline mode).  */
+
+struct is_neigh_rec {
+	uint8_t sysid[ISIS_SYS_ID_LEN];
+	uint32_t metric;
+};
+
+static void isis_area_proxy_is_neigh_add(struct list *list,
+					 const uint8_t *sysid,
+					 uint32_t metric)
+{
+	struct is_neigh_rec *r;
+
+	r = XCALLOC(MTYPE_ISIS_AREA_PROXY_PREFIX_AGG, sizeof(*r));
+	memcpy(r->sysid, sysid, ISIS_SYS_ID_LEN);
+	r->metric = metric;
+	listnode_add(list, r);
+}
+
+static void isis_area_proxy_is_neigh_free_rec(void *p)
+{
+	XFREE(MTYPE_ISIS_AREA_PROXY_PREFIX_AGG, p);
+}
+
+static int isis_area_proxy_is_neigh_cmp(const void **a, const void **b)
+{
+	const struct is_neigh_rec *ra = *a;
+	const struct is_neigh_rec *rb = *b;
+
+	return memcmp(ra->sysid, rb->sysid, ISIS_SYS_ID_LEN);
+}
+
+/*
+ * Write sorted IS neighbor entries to proxy_tlvs.
+ * Impl-opt: deduplicate by SysID, keep minimum metric.
+ * Baseline (faithful): write every entry verbatim.
+ */
+static void isis_area_proxy_is_neigh_write(struct list *sorted,
+					   struct isis_tlvs *tlvs,
+					   bool faithful)
+{
+	struct listnode *node;
+	struct is_neigh_rec *r;
+
+	for (ALL_LIST_ELEMENTS_RO(sorted, node, r)) {
+		if (!faithful) {
+			/* Impl-opt: dedup inline — same logic as
+			 * original inline dedup in old Step 2. */
+			struct isis_extended_reach *existing;
+			for (existing = (struct isis_extended_reach *)
+				     tlvs->extended_reach.head;
+			     existing; existing = existing->next) {
+				if (memcmp(existing->id, r->sysid,
+					   sizeof(existing->id)) == 0)
+					break;
+			}
+			if (existing) {
+				if (r->metric < existing->metric)
+					existing->metric = r->metric;
+				continue;
+			}
+		}
+		isis_tlvs_add_extended_reach(tlvs, ISIS_MT_IPV4_UNICAST,
+					     r->sysid, r->metric, NULL);
+	}
+}
+
 /*
  * Step 1~6: Aggregate L1 LSDB into a single Proxy LSP's TLVs.
  *   Step 1 — Basic TLVs (Protocols Supported, Area Addresses, Hostname)
@@ -1014,77 +1083,41 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 	/* ================================================================
 	 * STEP 2: Boundary IS Neighbors
 	 *
-	 * Iterate L2 LSDB. For each Inside Edge Router's LSP,
-	 * extract only the IS neighbors that point OUTSIDE the area
-	 * (i.e., not in L1 LSDB).
-	 * ================================================================ */
+	 * Collect (sysid, metric) pairs into a list, sort by SysID,
+	 * then write.  Sorting ensures deterministic TLV encoding;
+	 * the list preserves all entries including duplicates.  ================================================================ */
+
+	{
+		struct list *nb_list = list_new();
 
 	for (lsp = lspdb_first(&area->lspdb[ISIS_LEVEL2 - 1]); lsp; lsp = lspdb_next(&area->lspdb[ISIS_LEVEL2 - 1], lsp)) {
-		uint8_t *src_id = lsp->hdr.lsp_id;
+			uint8_t *src_id = lsp->hdr.lsp_id;
 
-		/* Skip Proxy LSP itself */
-		if (isis_lsp_is_proxy_lsp(lsp))
-			continue;
-
-		/* Only Inside Edge Routers have L2 LSPs */
-		if (!isis_sysid_in_l1_lsdb(area, src_id))
-			continue;
-
-		/* Skip expired LSPs */
-		if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0)
-			continue;
-
-		/* Iterate extended IS reachability */
-		if (!lsp->tlvs)
-			continue;
-
-		struct isis_extended_reach *reach;
-		for (reach = (struct isis_extended_reach *)
-				lsp->tlvs->extended_reach.head;
-		     reach; reach = reach->next) {
-			/* Skip neighbors that are INSIDE the area */
-			if (isis_sysid_in_l1_lsdb(area, reach->id))
+			if (isis_lsp_is_proxy_lsp(lsp))
+				continue;
+			if (!isis_sysid_in_l1_lsdb(area, src_id))
+				continue;
+			if (lsp->hdr.seqno == 0 || lsp->hdr.rem_lifetime == 0)
+				continue;
+			if (!lsp->tlvs)
 				continue;
 
-			/*
-			 * IS neighbor aggregation strategy:
-			 *
-			 * [impl-opt, default] Deduplicate: one entry per
-			 *   remote SysID, keeping the minimum metric across
-			 *   all Inside Edge Routers.  IIH masquerading makes
-			 *   multiple Edge Routers to the same area appear as
-			 *   the same neighbor → natural dedup.
-			 *
-			 * [baseline] RFC 9666 §4.4.5 "copy each": copy every
-			 *   IS neighbor entry verbatim, no dedup.  Used for
-			 *   control-plane cost analysis (K-value study).
-			 *   Toggle via CLI: [no] is-neighbor-baseline.
-			 */
-			if (area->area_proxy_rfc9666_faithful) {
-				/* Baseline: copy each (RFC 9666 §4.4.5) */
-				isis_tlvs_add_extended_reach(
-					proxy_tlvs, ISIS_MT_IPV4_UNICAST,
-					reach->id, reach->metric, NULL);
-			} else {
-				/* Impl-opt: dedup + min metric */
-				struct isis_extended_reach *existing;
-				for (existing = (struct isis_extended_reach *)
-					     proxy_tlvs->extended_reach.head;
-				     existing; existing = existing->next) {
-					if (memcmp(existing->id, reach->id,
-						   sizeof(existing->id)) == 0)
-						break;
-				}
-				if (existing) {
-					if (reach->metric < existing->metric)
-						existing->metric = reach->metric;
-				} else {
-					isis_tlvs_add_extended_reach(
-						proxy_tlvs, ISIS_MT_IPV4_UNICAST,
-						reach->id, reach->metric, NULL);
-				}
+			struct isis_extended_reach *reach;
+			for (reach = (struct isis_extended_reach *)
+					lsp->tlvs->extended_reach.head;
+			     reach; reach = reach->next) {
+				if (isis_sysid_in_l1_lsdb(area, reach->id))
+					continue;
+				isis_area_proxy_is_neigh_add(
+					nb_list, reach->id, reach->metric);
 			}
 		}
+
+		list_sort(nb_list, isis_area_proxy_is_neigh_cmp);
+		isis_area_proxy_is_neigh_write(nb_list, proxy_tlvs,
+					       area->area_proxy_rfc9666_faithful);
+		nb_list->del = isis_area_proxy_is_neigh_free_rec;
+		list_delete(&nb_list);
 	}
 
 	/* ================================================================
@@ -1114,12 +1147,32 @@ struct isis_tlvs *isis_area_proxy_aggregate_tlvs(struct isis_area *area)
 				proxy_aggregate_ip_reach_cb, pat);
 		}
 
-		/* Write collected prefixes to Proxy LSP */
-		struct proxy_agg_write_ctx ctx = { .proxy_tlvs = proxy_tlvs };
-		hash_iterate(pat, prefix_agg_write_cb, &ctx);
-		zlog_info("Area Proxy: aggregation summary — %u prefixes: %u with SID, %u without SID, %u conflict",
-			  ctx.cnt.total_prefixes, ctx.cnt.with_sid,
-			  ctx.cnt.without_sid, ctx.cnt.sid_conflict);
+		/* Write collected prefixes to Proxy LSP in deterministic
+		 * order (sorted by prefix).  hash_iterate() order depends
+		 * on insertion timing; sorting guarantees identical TLV
+		 * encoding on every reconcile cycle, which lets the
+		 * content-change guard skip unnecessary regenerations. */
+		{
+			struct proxy_agg_write_ctx ctx = {
+				.proxy_tlvs = proxy_tlvs
+			};
+			struct list *sorted = list_new();
+
+			sorted->del = NULL; /* entries owned by hash */
+			hash_iterate(pat, prefix_agg_collect_cb, sorted);
+			list_sort(sorted, prefix_agg_entry_list_cmp);
+
+			struct listnode *node;
+			struct prefix_agg_entry *e;
+			for (ALL_LIST_ELEMENTS_RO(sorted, node, e))
+				prefix_agg_write_entry(e, &ctx);
+
+			list_delete(&sorted);
+
+			zlog_info("Area Proxy: aggregation summary — %u prefixes: %u with SID, %u without SID, %u conflict",
+				  ctx.cnt.total_prefixes, ctx.cnt.with_sid,
+				  ctx.cnt.without_sid, ctx.cnt.sid_conflict);
+		}
 		hash_clean(pat, hash_clean_xfree_prefix_agg);
 		hash_free(pat);
 	}
@@ -1531,7 +1584,13 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 			"Proxy SysID set");
 	proxy_sysid_set_rebuild(area);
 
-	/* ── 4. Re-evaluate boundary circuits ── */
+	/* ── 4. Re-evaluate boundary circuits ──
+	 *
+	 * Only L2-only circuits (circuit-type level-2-only) on L1L2
+	 * routers are genuine cross-area boundaries.  L1L2 circuits
+	 * are intra-area links and must never be marked boundary —
+	 * the neighbor-sysid heuristic is unreliable during convergence
+	 * (BUG-018 §6.4). */
 	{
 		struct isis_circuit *circuit;
 		struct listnode *cnode;
@@ -1540,38 +1599,7 @@ static void isis_area_proxy_reconcile_cb(struct thread *t)
 			    (area->is_type & IS_LEVEL_1) &&
 			    circuit->is_type == IS_LEVEL_2) {
 				circuit->is_area_proxy_boundary = true;
-				continue;
 			}
-			if (!circuit->is_area_proxy_boundary &&
-			    (circuit->is_type & IS_LEVEL_2)) {
-				if (circuit->circ_type == CIRCUIT_T_P2P
-				    && circuit->u.p2p.neighbor
-				    && circuit->u.p2p.neighbor->adj_state == ISIS_ADJ_UP
-				    && !isis_sysid_in_l1_lsdb(area,
-					    circuit->u.p2p.neighbor->sysid)) {
-					circuit->is_area_proxy_boundary = true;
-					continue;
-				}
-			}
-			if (!circuit->is_area_proxy_boundary)
-				continue;
-			bool has_l1 = false;
-			if (circuit->circ_type == CIRCUIT_T_BROADCAST) {
-				struct listnode *node;
-				struct isis_adjacency *a;
-				for (ALL_LIST_ELEMENTS_RO(
-					     circuit->u.bc.adjdb[ISIS_LEVEL1 - 1],
-					     node, a))
-					if (a->adj_state == ISIS_ADJ_UP) {
-						has_l1 = true;
-						break;
-					}
-			} else if (circuit->circ_type == CIRCUIT_T_P2P
-				   && circuit->u.p2p.neighbor) {
-				has_l1 = (circuit->u.p2p.neighbor->level & ISIS_LEVEL1);
-			}
-			if (has_l1)
-				circuit->is_area_proxy_boundary = false;
 		}
 	}
 
@@ -1968,6 +1996,10 @@ int isis_area_proxy_lsp_generate(struct isis_area *area)
 		return 0;
 	}
 	area->ap_reconcile_running = true;
+
+	zlog_info("Area Proxy: generate ENTER dirty=%d ready_cnt=%u reasons=0x%x",
+		  area->proxy_lsp_dirty, area->area_proxy_ready_count,
+		  area->ap_pending_reasons);
 
 	/* Ensure lsp_mtu is initialized before first Proxy LSP generation.
 	 * During config parsing, area->lsp_mtu may still be 0, causing

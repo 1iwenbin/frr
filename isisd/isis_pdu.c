@@ -184,7 +184,9 @@ static int process_p2p_hello(struct iih_info *iih)
 	if (adj) {
 		if (memcmp(iih->sys_id, adj->sysid, ISIS_SYS_ID_LEN)) {
 			zlog_debug(
-				"hello source and adjacency do not match, tear down old and create new");
+				"hello source and adjacency do not match on %s (IIH=%pSY adj=%pSY), tear down old and create new",
+				iih->circuit->interface->name,
+				iih->sys_id, adj->sysid);
 			isis_adj_state_change(&adj, ISIS_ADJ_DOWN,
 					      "sysid changed (e.g. proxy masquerading started)");
 			adj = NULL;
